@@ -56,8 +56,10 @@ class LegoVisionEncoder:
         )
 
         # ── Freeze vision encoder ──────────────────────────────────────
-        for param in self.model.visual.parameters():
-            param.requires_grad = False
+        # Freeze by parameter name pattern (robust across transformers versions)
+        for name, param in self.model.named_parameters():
+            if "visual" in name or "vision" in name:
+                param.requires_grad = False
 
         # ── Apply LoRA or load existing adapter ────────────────────────
         if load_adapter:
