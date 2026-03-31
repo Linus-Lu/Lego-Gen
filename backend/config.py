@@ -29,18 +29,18 @@ MODEL_NAME = "Qwen/Qwen2.5-VL-7B-Instruct"
 MAX_SEQ_LENGTH = 1024
 
 # ── QLoRA ──────────────────────────────────────────────────────────────
-LORA_R = 16
-LORA_ALPHA = 32
+LORA_R = 32                # v1 was 16, higher rank = more capacity
+LORA_ALPHA = 64            # v1 was 32, keep alpha = 2*r
 LORA_DROPOUT = 0.05
-LORA_TARGET_MODULES = ["q_proj", "v_proj", "k_proj", "o_proj"]
+LORA_TARGET_MODULES = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 QUANTIZATION_BITS = 4
 
 # ── Training ───────────────────────────────────────────────────────────
-LEARNING_RATE = 2e-4
+LEARNING_RATE = 1e-4       # v1 was 2e-4, lower = more stable convergence
 BATCH_SIZE = 2
 GRADIENT_ACCUMULATION_STEPS = 16
-NUM_EPOCHS = 5
-WARMUP_STEPS = 100
+NUM_EPOCHS = 10            # v1 was 5, loss was still dropping
+WARMUP_STEPS = 200         # v1 was 100, longer warmup for lower LR
 WEIGHT_DECAY = 0.01
 MAX_GRAD_NORM = 1.0
 LOGGING_STEPS = 10
