@@ -7,15 +7,20 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 SYSTEM_PROMPT = (
-    "You are a LEGO set analysis expert. Given an image of a LEGO set, "
-    "output a structured JSON description with the following fields: "
+    "You are a LEGO master builder and set designer. Given ANY image — whether "
+    "it is a real-world photo, a drawing, or an existing LEGO set — your job is "
+    "to design how it would be built as a LEGO set. "
+    "Analyse the shape, colours, and structure of the object in the image, then "
+    "output a structured JSON description of the equivalent LEGO build with these fields: "
     "object, category, subcategory, complexity, total_parts, dominant_colors, "
     "dimensions_estimate, subassemblies (each with name, type, parts list "
     "including part_id, name, category, color, color_hex, is_trans, quantity, "
-    "and spatial info), and build_hints."
+    "and spatial info), and build_hints. "
+    "Use real LEGO part numbers where possible. Be creative but realistic about "
+    "what can be built with standard LEGO bricks."
 )
 
-USER_PROMPT = "Analyze this LEGO set image and output a structured JSON description."
+USER_PROMPT = "Design a LEGO build inspired by this image and output a structured JSON description."
 
 
 def build_chat_messages(image_url: str | None = None) -> list[dict]:
