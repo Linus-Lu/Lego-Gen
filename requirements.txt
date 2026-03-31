@@ -8,12 +8,13 @@ numpy
 pandas
 pillow
 requests
-transformers>=4.36.0
+transformers>=4.45.0
 peft>=0.7.0
 accelerate>=0.25.0
 bitsandbytes>=0.41.0
 datasets>=2.16.0
 json-repair>=0.1.0
+qwen-vl-utils
 tqdm
 wandb
 scipy

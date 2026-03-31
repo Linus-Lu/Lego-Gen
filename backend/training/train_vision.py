@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Fine-tune BLIP-2 with QLoRA on LEGO image-to-JSON dataset.
+"""Fine-tune Qwen2.5-VL with QLoRA on LEGO image-to-JSON dataset.
 
 Usage:
     python -m backend.training.train_vision
-    python -m backend.training.train_vision --resume checkpoints/blip2-lego-lora/checkpoint-400
+    python -m backend.training.train_vision --resume checkpoints/qwen-lego-lora/checkpoint-400
 """
 
 import argparse
@@ -13,8 +13,8 @@ from pathlib import Path
 
 import torch
 from transformers import (
-    Seq2SeqTrainingArguments,
-    Seq2SeqTrainer,
+    TrainingArguments,
+    Trainer,
     TrainerCallback,
 )
 
@@ -51,9 +51,9 @@ from backend.training.utils import (
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train BLIP-2 LoRA for LEGO")
+    parser = argparse.ArgumentParser(description="Train Qwen2.5-VL LoRA for LEGO")
     parser.add_argument("--data-dir", type=str, default=str(DATA_DIR))
-    parser.add_argument("--output-dir", type=str, default=str(CHECKPOINT_DIR / "blip2-lego-lora"))
+    parser.add_argument("--output-dir", type=str, default=str(CHECKPOINT_DIR / "qwen-lego-lora"))
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint path")
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
@@ -73,7 +73,6 @@ class JsonValidityCallback(TrainerCallback):
     def on_evaluate(self, args, state, control, model=None, **kwargs):
         if model is None:
             return
-        # This is a lightweight check; full metrics are in compute_metrics
         print(f"  Step {state.global_step}: evaluation complete")
 
 
@@ -124,10 +123,10 @@ def main():
 
     # ── W&B ────────────────────────────────────────────────────────────
     if not args.no_wandb:
-        setup_wandb("legogen-blip2", config=vars(args))
+        setup_wandb("legogen-qwen25vl", config=vars(args))
 
     # ── Model ──────────────────────────────────────────────────────────
-    print("Loading BLIP-2 with QLoRA...")
+    print("Loading Qwen2.5-VL with QLoRA...")
     encoder = LegoVisionEncoder(
         model_name=MODEL_NAME,
         load_adapter=args.resume if args.resume else None,
@@ -158,7 +157,7 @@ def main():
     print(f"  Train: {len(train_ds)} samples, Val: {len(val_ds)} samples")
 
     # ── Training arguments ─────────────────────────────────────────────
-    training_args = Seq2SeqTrainingArguments(
+    training_args = TrainingArguments(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
@@ -178,23 +177,20 @@ def main():
         save_steps=SAVE_STEPS,
         save_total_limit=SAVE_TOTAL_LIMIT,
         load_best_model_at_end=True,
-        metric_for_best_model="json_validity_rate",
-        greater_is_better=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
         report_to="wandb" if not args.no_wandb else "none",
         dataloader_num_workers=4,
         gradient_checkpointing=True,
-        predict_with_generate=True,
-        generation_max_length=MAX_NEW_TOKENS,
         remove_unused_columns=False,
     )
 
     # ── Trainer ────────────────────────────────────────────────────────
-    trainer = Seq2SeqTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=val_ds,
-        compute_metrics=build_compute_metrics(processor),
         callbacks=[JsonValidityCallback(processor)],
     )
 

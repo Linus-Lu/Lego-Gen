@@ -1,11 +1,11 @@
-"""BLIP-2 model wrapper with QLoRA for LEGO image-to-JSON fine-tuning."""
+"""Qwen2.5-VL model wrapper with QLoRA for LEGO image-to-JSON fine-tuning."""
 
 from pathlib import Path
 
 import torch
 from transformers import (
-    Blip2ForConditionalGeneration,
-    Blip2Processor,
+    Qwen2_5_VLForConditionalGeneration,
+    AutoProcessor,
     BitsAndBytesConfig,
 )
 from peft import LoraConfig, get_peft_model, PeftModel, TaskType
@@ -25,7 +25,7 @@ from backend.config import (
 
 
 class LegoVisionEncoder:
-    """Wraps BLIP-2 with QLoRA adapters for efficient fine-tuning."""
+    """Wraps Qwen2.5-VL with QLoRA adapters for efficient fine-tuning."""
 
     def __init__(
         self,
@@ -43,18 +43,20 @@ class LegoVisionEncoder:
         )
 
         # ── Load base model ────────────────────────────────────────────
-        self.processor = Blip2Processor.from_pretrained(model_name)
-        self.model = Blip2ForConditionalGeneration.from_pretrained(
+        self.processor = AutoProcessor.from_pretrained(
+            model_name,
+            min_pixels=256 * 28 * 28,
+            max_pixels=512 * 28 * 28,
+        )
+        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_name,
             quantization_config=self.bnb_config,
             device_map="auto",
             torch_dtype=torch.bfloat16 if USE_BF16 else torch.float16,
         )
 
-        # ── Freeze vision encoder and Q-Former ─────────────────────────
-        for param in self.model.vision_model.parameters():
-            param.requires_grad = False
-        for param in self.model.qformer.parameters():
+        # ── Freeze vision encoder ──────────────────────────────────────
+        for param in self.model.visual.parameters():
             param.requires_grad = False
 
         # ── Apply LoRA or load existing adapter ────────────────────────
@@ -64,7 +66,7 @@ class LegoVisionEncoder:
             self._apply_lora()
 
     def _apply_lora(self):
-        """Apply LoRA adapters to the language model."""
+        """Apply LoRA adapters to the language model layers."""
         lora_config = LoraConfig(
             r=LORA_R,
             lora_alpha=LORA_ALPHA,
@@ -78,12 +80,12 @@ class LegoVisionEncoder:
     def get_model(self):
         return self.model
 
-    def get_processor(self) -> Blip2Processor:
+    def get_processor(self):
         return self.processor
 
     def save_adapter(self, path: str | Path | None = None):
         """Save only the LoRA adapter weights (small, ~50MB)."""
-        save_path = Path(path) if path else CHECKPOINT_DIR / "blip2-lego-lora"
+        save_path = Path(path) if path else CHECKPOINT_DIR / "qwen-lego-lora"
         save_path.mkdir(parents=True, exist_ok=True)
         self.model.save_pretrained(str(save_path))
         self.processor.save_pretrained(str(save_path))

@@ -1,4 +1,4 @@
-"""PyTorch Dataset for BLIP-2 fine-tuning on LEGO image-JSON pairs."""
+"""PyTorch Dataset for Qwen2.5-VL fine-tuning on LEGO image-JSON pairs."""
 
 import json
 from pathlib import Path
@@ -10,8 +10,10 @@ from torchvision import transforms
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from backend.config import DATA_DIR, IMAGE_SIZE, MAX_SEQ_LENGTH
+from backend.config import DATA_DIR, MAX_SEQ_LENGTH
+from backend.models.tokenizer import SYSTEM_PROMPT, USER_PROMPT
 
+IMAGE_SIZE = 448  # Qwen2.5-VL dynamic resolution, but we resize for augmentation
 
 # ── Augmentation transforms ───────────────────────────────────────────
 
@@ -20,7 +22,6 @@ TRAIN_TRANSFORMS = transforms.Compose([
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.RandomRotation(degrees=15),
     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.3, hue=0.05),
-    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
 ])
 
 VAL_TRANSFORMS = transforms.Compose([
@@ -53,7 +54,6 @@ class LegoDataset(Dataset):
             label_path = self.labels_dir / f"{set_num}.json"
             if not label_path.exists():
                 continue
-            # Find matching image (could be .jpg or .png)
             image_path = self._find_image(set_num)
             if image_path:
                 self.samples.append((image_path, label_path))
@@ -83,38 +83,65 @@ class LegoDataset(Dataset):
             label = json.load(f)
         label_text = json.dumps(label, indent=2)
 
-        # Process with BLIP-2 processor
         if self.processor is not None:
-            from backend.models.tokenizer import get_json_prompt
+            # Build chat messages for Qwen2.5-VL
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": USER_PROMPT},
+                    ],
+                },
+                {
+                    "role": "assistant",
+                    "content": label_text,
+                },
+            ]
 
-            prompt = get_json_prompt()
+            # Apply chat template to get the full text
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=False
+            )
+
+            # Process with the Qwen processor
             inputs = self.processor(
-                images=image,
-                text=prompt,
+                text=[text],
+                images=[image],
                 return_tensors="pt",
                 max_length=self.max_length,
                 padding="max_length",
                 truncation=True,
             )
-            # Squeeze batch dim added by processor
+            # Squeeze batch dim
             inputs = {k: v.squeeze(0) for k, v in inputs.items()}
 
-            # Tokenize the label as target
-            labels = self.processor.tokenizer(
-                label_text,
-                return_tensors="pt",
-                max_length=self.max_length,
-                padding="max_length",
-                truncation=True,
+            # Create labels: copy input_ids, mask everything before the assistant response with -100
+            input_ids = inputs["input_ids"]
+            labels = input_ids.clone()
+
+            # Find where the assistant response starts by looking for the assistant header token
+            # Mask the prompt portion so loss is only computed on the JSON output
+            text_prompt_only = self.processor.apply_chat_template(
+                messages[:2], tokenize=False, add_generation_prompt=True
             )
-            inputs["labels"] = labels["input_ids"].squeeze(0)
-            # Mask padding tokens in labels with -100 so they're ignored in loss
+            prompt_tokens = self.processor.tokenizer(
+                text_prompt_only, return_tensors="pt", truncation=True,
+                max_length=self.max_length,
+            )
+            prompt_len = prompt_tokens["input_ids"].shape[1]
+
+            labels[:prompt_len] = -100
+            # Also mask padding tokens
             pad_token_id = self.processor.tokenizer.pad_token_id
-            inputs["labels"][inputs["labels"] == pad_token_id] = -100
+            if pad_token_id is not None:
+                labels[labels == pad_token_id] = -100
+
+            inputs["labels"] = labels
 
             return inputs
         else:
-            # Return raw data (useful for inspection)
             return {"image": image, "label": label, "label_text": label_text}
 
 
@@ -128,7 +155,7 @@ def load_splits(data_dir: Path = DATA_DIR) -> dict[str, list[str]]:
 def create_dataloaders(
     processor,
     data_dir: Path = DATA_DIR,
-    batch_size: int = 4,
+    batch_size: int = 2,
     num_workers: int = 4,
     max_length: int = MAX_SEQ_LENGTH,
 ) -> tuple:

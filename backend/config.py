@@ -25,21 +25,20 @@ VAL_RATIO = 0.1
 SPLITS_FILE = DATA_DIR / "splits.json"
 
 # ── Model ──────────────────────────────────────────────────────────────
-MODEL_NAME = "Salesforce/blip2-opt-2.7b"
-IMAGE_SIZE = 224
+MODEL_NAME = "Qwen/Qwen2.5-VL-7B-Instruct"
 MAX_SEQ_LENGTH = 1024
 
 # ── QLoRA ──────────────────────────────────────────────────────────────
 LORA_R = 16
 LORA_ALPHA = 32
 LORA_DROPOUT = 0.05
-LORA_TARGET_MODULES = ["q_proj", "v_proj"]
+LORA_TARGET_MODULES = ["q_proj", "v_proj", "k_proj", "o_proj"]
 QUANTIZATION_BITS = 4
 
 # ── Training ───────────────────────────────────────────────────────────
 LEARNING_RATE = 2e-4
-BATCH_SIZE = 4
-GRADIENT_ACCUMULATION_STEPS = 8
+BATCH_SIZE = 2
+GRADIENT_ACCUMULATION_STEPS = 16
 NUM_EPOCHS = 5
 WARMUP_STEPS = 100
 WEIGHT_DECAY = 0.01
@@ -50,7 +49,7 @@ SAVE_STEPS = 200
 SAVE_TOTAL_LIMIT = 3
 
 # ── Inference ──────────────────────────────────────────────────────────
-MAX_NEW_TOKENS = 512
+MAX_NEW_TOKENS = 1024
 NUM_BEAMS = 1
 TEMPERATURE = 0.7
 TOP_P = 0.9

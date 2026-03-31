@@ -16,11 +16,6 @@ from backend.config import (
     LEGOGEN_DEV,
 )
 
-# Lazy imports — only needed when real pipeline is used
-# from backend.models.vision_encoder import LegoVisionEncoder
-# from backend.models.tokenizer import get_json_prompt, extract_json_from_text
-# from backend.inference.constraint_engine import safe_parse_and_validate, enforce_valid_values
-
 
 # ── Singleton ──────────────────────────────────────────────────────────
 
@@ -142,7 +137,7 @@ class LegoGenPipeline:
         from backend.models.vision_encoder import LegoVisionEncoder
 
         if adapter_path is None:
-            adapter_path = CHECKPOINT_DIR / "blip2-lego-lora"
+            adapter_path = CHECKPOINT_DIR / "qwen-lego-lora"
 
         adapter_path = Path(adapter_path)
         load_adapter = str(adapter_path) if adapter_path.exists() else None
@@ -163,33 +158,41 @@ class LegoGenPipeline:
         """Generate a structured JSON description from a LEGO image."""
         import torch
         import json
-        from backend.models.tokenizer import get_json_prompt, extract_json_from_text
+        from backend.models.tokenizer import build_chat_messages, extract_json_from_text
         from backend.inference.constraint_engine import safe_parse_and_validate, enforce_valid_values
 
         start = time.time()
 
         with torch.inference_mode():
-            prompt = get_json_prompt()
+            # Build chat messages for Qwen2.5-VL
+            messages = build_chat_messages()
+
+            # Apply chat template
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+
             inputs = self.processor(
-                images=image,
-                text=prompt,
+                text=[text],
+                images=[image],
                 return_tensors="pt",
             ).to(self.model.device)
 
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                num_beams=NUM_BEAMS,
                 temperature=TEMPERATURE,
                 top_p=TOP_P,
-                do_sample=NUM_BEAMS == 1,
+                do_sample=True,
             )
 
+            # Decode only the generated tokens (skip the input)
+            generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
             raw_output = self.processor.tokenizer.decode(
-                outputs[0], skip_special_tokens=True
+                generated_ids, skip_special_tokens=True
             )
 
-        # Parse and validate (outside inference_mode)
+        # Parse and validate
         parsed = extract_json_from_text(raw_output)
         if parsed:
             parsed = enforce_valid_values(parsed)
@@ -209,13 +212,9 @@ class LegoGenPipeline:
         }
 
     def generate_build(self, image) -> dict:
-        """Full pipeline: image -> description -> build steps.
-
-        Returns dict with description, steps, and metadata.
-        """
+        """Full pipeline: image -> description -> build steps."""
         result = self.describe_image(image)
 
-        # Convert description to build steps
         from backend.inference.postprocess_manual import json_to_steps
         steps = json_to_steps(result["description"]) if result["description"] else []
 
@@ -223,7 +222,7 @@ class LegoGenPipeline:
             "description": result["description"],
             "steps": steps,
             "metadata": {
-                "model_version": "blip2-lego-lora-v1",
+                "model_version": "qwen25vl-lego-lora-v1",
                 "generation_time_ms": result["generation_time_ms"],
                 "json_valid": result["is_valid"],
                 "errors": result["errors"],
