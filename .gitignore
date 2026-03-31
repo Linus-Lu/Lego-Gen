@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Model weights & checkpoints (large binary files)
+backend/models/checkpoints/
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+*.pt
+
+# Data (generated, not source)
+data/images/
+data/cache/
+data/labels/
+data/splits.json
+
+# Logs & outputs
+logs/
+*.log
+wandb/
+runs/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.*
+
+# IDE & local tooling
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/
+.vite/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.key
+*.pem
+*.secret
