@@ -29,10 +29,18 @@ class RebrickableLoader:
             time.sleep(REBRICKABLE_RATE_LIMIT - elapsed)
         self._last_request_time = time.time()
 
-    def _get(self, endpoint: str, params: dict | None = None) -> dict:
-        self._rate_limit()
+    def _get(self, endpoint: str, params: dict | None = None, max_retries: int = 5) -> dict:
         url = f"{REBRICKABLE_BASE_URL}/{endpoint}"
-        resp = requests.get(url, headers=self.headers, params=params or {}, timeout=30)
+        for attempt in range(max_retries):
+            self._rate_limit()
+            resp = requests.get(url, headers=self.headers, params=params or {}, timeout=30)
+            if resp.status_code == 429:
+                wait = min(2 ** attempt * 2, 60)
+                print(f"  Rate limited, waiting {wait}s (attempt {attempt + 1}/{max_retries})...")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json()
         resp.raise_for_status()
         return resp.json()
 

@@ -16,7 +16,7 @@ CHECKPOINT_DIR = BACKEND_DIR / "models" / "checkpoints"
 # ── Rebrickable API ────────────────────────────────────────────────────
 REBRICKABLE_API_KEY = os.environ.get("REBRICKABLE_API_KEY", "")
 REBRICKABLE_BASE_URL = "https://rebrickable.com/api/v3/lego"
-REBRICKABLE_RATE_LIMIT = 1.0  # seconds between requests
+REBRICKABLE_RATE_LIMIT = 1.5  # seconds between requests (free tier is strict)
 
 # ── Dataset ────────────────────────────────────────────────────────────
 MIN_PARTS = 5
