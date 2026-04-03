@@ -1,4 +1,4 @@
-"""Qwen2.5 text-only model wrapper with QLoRA for LEGO text-to-JSON fine-tuning."""
+"""Qwen3 text-only model wrapper with QLoRA for LEGO text-to-JSON fine-tuning."""
 
 from pathlib import Path
 
@@ -25,7 +25,7 @@ from backend.config import (
 
 
 class LegoPlannerLM:
-    """Wraps Qwen2.5-7B-Instruct with QLoRA adapters for text-to-JSON fine-tuning."""
+    """Wraps Qwen3-8B with QLoRA adapters for text-to-JSON fine-tuning."""
 
     def __init__(
         self,
@@ -53,6 +53,9 @@ class LegoPlannerLM:
             device_map="auto",
             torch_dtype=torch.bfloat16 if USE_BF16 else torch.float16,
         )
+
+        # ── Enable input gradients for gradient checkpointing compat ──
+        self.model.enable_input_require_grads()
 
         # ── Apply LoRA or load existing adapter ────────────────────────
         if load_adapter:

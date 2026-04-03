@@ -1,10 +1,10 @@
-"""Qwen2.5-VL model wrapper with QLoRA for LEGO image-to-JSON fine-tuning."""
+"""Qwen3-VL model wrapper with QLoRA for LEGO image-to-JSON fine-tuning."""
 
 from pathlib import Path
 
 import torch
 from transformers import (
-    Qwen2_5_VLForConditionalGeneration,
+    Qwen3VLForConditionalGeneration,
     AutoProcessor,
     BitsAndBytesConfig,
 )
@@ -25,7 +25,7 @@ from backend.config import (
 
 
 class LegoVisionEncoder:
-    """Wraps Qwen2.5-VL with QLoRA adapters for efficient fine-tuning."""
+    """Wraps Qwen3-VL with QLoRA adapters for efficient fine-tuning."""
 
     def __init__(
         self,
@@ -48,7 +48,7 @@ class LegoVisionEncoder:
             min_pixels=256 * 28 * 28,
             max_pixels=512 * 28 * 28,
         )
-        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        self.model = Qwen3VLForConditionalGeneration.from_pretrained(
             model_name,
             quantization_config=self.bnb_config,
             device_map="auto",
@@ -60,6 +60,9 @@ class LegoVisionEncoder:
         for name, param in self.model.named_parameters():
             if "visual" in name or "vision" in name:
                 param.requires_grad = False
+
+        # ── Enable input gradients for gradient checkpointing compat ──
+        self.model.enable_input_require_grads()
 
         # ── Apply LoRA or load existing adapter ────────────────────────
         if load_adapter:

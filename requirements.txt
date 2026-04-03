@@ -8,7 +8,7 @@ numpy
 pandas
 pillow
 requests
-transformers>=4.45.0
+transformers>=4.57.0
 peft>=0.7.0
 accelerate>=0.25.0
 bitsandbytes>=0.41.0

@@ -182,7 +182,7 @@ class LegoGenPipeline:
         start = time.time()
 
         with torch.inference_mode():
-            # Build chat messages for Qwen2.5-VL
+            # Build chat messages for Qwen3-VL
             messages = build_chat_messages()
 
             # Apply chat template

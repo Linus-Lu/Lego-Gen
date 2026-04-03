@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fine-tune Qwen2.5-VL with QLoRA on LEGO image-to-JSON dataset.
+"""Fine-tune Qwen3-VL with QLoRA on LEGO image-to-JSON dataset.
 
 Usage:
     python -m backend.training.train_vision
@@ -51,7 +51,7 @@ from backend.training.utils import (
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train Qwen2.5-VL LoRA for LEGO")
+    parser = argparse.ArgumentParser(description="Train Qwen3-VL LoRA for LEGO")
     parser.add_argument("--data-dir", type=str, default=str(DATA_DIR))
     parser.add_argument("--output-dir", type=str, default=str(CHECKPOINT_DIR / "qwen-lego-lora"))
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint path")
@@ -126,7 +126,7 @@ def main():
         setup_wandb("legogen-qwen25vl", config=vars(args))
 
     # ── Model ──────────────────────────────────────────────────────────
-    print("Loading Qwen2.5-VL with QLoRA...")
+    print("Loading Qwen3-VL with QLoRA...")
     encoder = LegoVisionEncoder(
         model_name=MODEL_NAME,
         load_adapter=args.resume if args.resume else None,
@@ -182,6 +182,7 @@ def main():
         report_to="wandb" if not args.no_wandb else "none",
         dataloader_num_workers=4,
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         remove_unused_columns=False,
     )
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fine-tune Qwen2.5-7B-Instruct with QLoRA on LEGO text-to-JSON dataset.
+"""Fine-tune Qwen3-8B with QLoRA on LEGO text-to-JSON dataset.
 
 Trains on combined Rebrickable (1.6k upsampled) + StableText2Brick (40k) data.
 
@@ -53,7 +53,7 @@ from backend.training.utils import (
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train Qwen2.5 LoRA for LEGO text-to-JSON")
+    parser = argparse.ArgumentParser(description="Train Qwen3 LoRA for LEGO text-to-JSON")
     parser.add_argument("--data-dir", type=str, default=str(DATA_DIR))
     parser.add_argument("--output-dir", type=str, default=str(PLANNER_CHECKPOINT_DIR))
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint path")
@@ -87,7 +87,7 @@ def main():
         setup_wandb("legogen-planner", config=vars(args))
 
     # ── Model ──────────────────────────────────────────────────────────
-    print("Loading Qwen2.5-7B-Instruct with QLoRA...")
+    print("Loading Qwen3-8B with QLoRA...")
     planner = LegoPlannerLM(
         model_name=PLANNER_MODEL_NAME,
         load_adapter=args.resume if args.resume else None,

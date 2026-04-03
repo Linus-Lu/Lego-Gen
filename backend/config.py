@@ -25,7 +25,7 @@ VAL_RATIO = 0.1
 SPLITS_FILE = DATA_DIR / "splits.json"
 
 # ── Model ──────────────────────────────────────────────────────────────
-MODEL_NAME = "Qwen/Qwen2.5-VL-7B-Instruct"
+MODEL_NAME = "Qwen/Qwen3-VL-8B-Instruct"
 MAX_SEQ_LENGTH = 1024
 
 # ── QLoRA ──────────────────────────────────────────────────────────────
@@ -39,7 +39,7 @@ QUANTIZATION_BITS = 4
 LEARNING_RATE = 1e-4       # v1 was 2e-4, lower = more stable convergence
 BATCH_SIZE = 2
 GRADIENT_ACCUMULATION_STEPS = 16
-NUM_EPOCHS = 10            # v1 was 5, loss was still dropping
+NUM_EPOCHS = 3             # v2 was 10, reduced for faster iteration
 WARMUP_STEPS = 200         # v1 was 100, longer warmup for lower LR
 WEIGHT_DECAY = 0.01
 MAX_GRAD_NORM = 1.0
@@ -49,11 +49,11 @@ SAVE_STEPS = 200
 SAVE_TOTAL_LIMIT = 3
 
 # ── Planner (text-to-JSON) ─────────────────────────────────────────
-PLANNER_MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
+PLANNER_MODEL_NAME = "Qwen/Qwen3-8B"
 PLANNER_CHECKPOINT_DIR = BACKEND_DIR / "models" / "checkpoints" / "qwen-lego-planner-lora"
 PLANNER_MAX_SEQ_LENGTH = 2048
 PLANNER_LEARNING_RATE = 5e-5
-PLANNER_NUM_EPOCHS = 10
+PLANNER_NUM_EPOCHS = 3
 PLANNER_WARMUP_STEPS = 500
 
 # ── StableText2Brick dataset ──────────────────────────────────────

@@ -1,4 +1,4 @@
-"""Prompt templates and JSON encoding/decoding utilities for Qwen2.5-VL fine-tuning."""
+"""Prompt templates and JSON encoding/decoding utilities for Qwen3-VL fine-tuning."""
 
 import json
 from pathlib import Path
@@ -106,7 +106,7 @@ def sample_prompt_template(label: dict, epoch: int = 0, rng=None) -> str:
 # ── Vision (image-to-JSON) chat messages ──────────────────────────
 
 def build_chat_messages(image_url: str | None = None) -> list[dict]:
-    """Build Qwen2.5-VL chat messages for LEGO analysis.
+    """Build Qwen3-VL chat messages for LEGO analysis.
 
     For training, image_url can be a local file path.
     For inference, it can be a PIL image passed via the processor.
