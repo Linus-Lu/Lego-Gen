@@ -5,7 +5,7 @@ import StepList from '../components/StepList';
 import StepDetail from '../components/StepDetail';
 import ColorLegend from '../components/ColorLegend';
 import LegoViewer from '../components/LegoViewer';
-import { generateBuild } from '../api/legogen';
+import { generateBuild, generateBuildFromText } from '../api/legogen';
 import type { GenerateResponse } from '../api/legogen';
 
 interface Message {
@@ -69,8 +69,12 @@ const BuildSession: React.FC = () => {
     setIsLoading(true);
 
     try {
-      const imageFile = fileToSend ?? new File([new Uint8Array(1)], 'prompt.jpg', { type: 'image/jpeg' });
-      const result = await generateBuild(imageFile, textToSend || undefined);
+      let result: GenerateResponse;
+      if (fileToSend) {
+        result = await generateBuild(fileToSend, textToSend || undefined);
+      } else {
+        result = await generateBuildFromText(textToSend);
+      }
       setBuildResult(result);
       setCurrentStep(1);
 

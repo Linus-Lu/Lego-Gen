@@ -48,6 +48,21 @@ EVAL_STEPS = 200
 SAVE_STEPS = 200
 SAVE_TOTAL_LIMIT = 3
 
+# ── Planner (text-to-JSON) ─────────────────────────────────────────
+PLANNER_MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
+PLANNER_CHECKPOINT_DIR = BACKEND_DIR / "models" / "checkpoints" / "qwen-lego-planner-lora"
+PLANNER_MAX_SEQ_LENGTH = 2048
+PLANNER_LEARNING_RATE = 5e-5
+PLANNER_NUM_EPOCHS = 10
+PLANNER_WARMUP_STEPS = 500
+
+# ── StableText2Brick dataset ──────────────────────────────────────
+ST2B_DATASET = "AvaLovelace/StableText2Brick"
+ST2B_CACHE_DIR = DATA_DIR / "st2b_cache"
+ST2B_CONVERTED_DIR = DATA_DIR / "st2b_labels"
+ST2B_PROMPTS_DIR = DATA_DIR / "st2b_prompts"
+PLANNER_PROMPTS_DIR = DATA_DIR / "prompts"
+
 # ── Inference ──────────────────────────────────────────────────────────
 MAX_NEW_TOKENS = 1024
 NUM_BEAMS = 1

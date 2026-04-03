@@ -122,6 +122,39 @@ def enforce_valid_values(data: dict) -> dict:
     return data
 
 
+def validate_part_ids(data: dict, known_parts: set[str]) -> list[str]:
+    """Flag part IDs not found in the known catalog."""
+    warnings = []
+    for i, sa in enumerate(data.get("subassemblies", [])):
+        for j, part in enumerate(sa.get("parts", [])):
+            pid = part.get("part_id", "")
+            if pid and pid not in known_parts:
+                warnings.append(f"subassemblies[{i}].parts[{j}]: unknown part_id '{pid}'")
+    return warnings
+
+
+def repair_connects_to(data: dict) -> dict:
+    """Ensure connects_to references match actual subassembly names."""
+    valid_names = {sa.get("name", "") for sa in data.get("subassemblies", [])}
+    for sa in data.get("subassemblies", []):
+        spatial = sa.get("spatial", {})
+        connects = spatial.get("connects_to", [])
+        spatial["connects_to"] = [c for c in connects if c in valid_names]
+        sa["spatial"] = spatial
+    return data
+
+
+def validate_structural_order(data: dict) -> list[str]:
+    """Check that subassemblies follow a bottom-to-top ordering."""
+    position_order = {"bottom": 0, "center": 1, "front": 2, "back": 2, "left": 2, "right": 2, "top": 3}
+    warnings = []
+    subs = data.get("subassemblies", [])
+    orders = [position_order.get(sa.get("spatial", {}).get("position", "center"), 1) for sa in subs]
+    if orders != sorted(orders):
+        warnings.append("Subassemblies are not ordered bottom-to-top")
+    return warnings
+
+
 def safe_parse_and_validate(raw: str) -> tuple[dict | None, list[str]]:
     """Full pipeline: repair -> parse -> validate -> enforce valid values.
 
@@ -143,5 +176,8 @@ def safe_parse_and_validate(raw: str) -> tuple[dict | None, list[str]]:
 
     # Step 4: Enforce valid values (fix what we can)
     data = enforce_valid_values(data)
+
+    # Step 5: Repair connects_to references
+    data = repair_connects_to(data)
 
     return data, errors

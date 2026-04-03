@@ -9,7 +9,7 @@ from PIL import Image
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from backend.inference.pipeline import get_pipeline
+from backend.inference.pipeline import get_pipeline, get_planner_pipeline
 
 router = APIRouter(prefix="/api", tags=["generate"])
 
@@ -47,5 +47,26 @@ async def generate(
     # Run inference
     pipeline = get_pipeline()
     result = pipeline.generate_build(pil_image)
+
+    return result
+
+
+@router.post("/generate-from-text")
+async def generate_from_text(
+    prompt: str = Form(...),
+):
+    """Generate LEGO description and build steps from a text prompt.
+
+    Args:
+        prompt: Text description of the desired LEGO model.
+
+    Returns:
+        JSON with description, steps, and metadata.
+    """
+    if not prompt.strip():
+        raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+
+    pipeline = get_planner_pipeline()
+    result = pipeline.generate_build_from_text(prompt.strip())
 
     return result
