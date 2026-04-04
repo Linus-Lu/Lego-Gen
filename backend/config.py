@@ -24,13 +24,16 @@ MAX_PARTS = 500
 VAL_RATIO = 0.1
 SPLITS_FILE = DATA_DIR / "splits.json"
 
-# ── Model ──────────────────────────────────────────────────────────────
+# ── Vision Model (backward compat with checked-in adapter) ───────────
 MODEL_NAME = "Qwen/Qwen3-VL-8B-Instruct"
 MAX_SEQ_LENGTH = 4096
 
-# ── QLoRA ──────────────────────────────────────────────────────────────
-LORA_R = 32                # v1 was 16, higher rank = more capacity
-LORA_ALPHA = 64            # v1 was 32, keep alpha = 2*r
+# ── Unified Model ─────────────────────────────────────────────────────
+UNIFIED_MODEL_NAME = "Qwen/Qwen3.5-9B"
+
+# ── QLoRA (vision-only — keeps original targets for existing adapter) ─
+LORA_R = 32
+LORA_ALPHA = 64
 LORA_DROPOUT = 0.05
 LORA_TARGET_MODULES = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 QUANTIZATION_BITS = 4
@@ -72,6 +75,24 @@ ST2B_CACHE_DIR = DATA_DIR / "st2b_cache"
 ST2B_CONVERTED_DIR = DATA_DIR / "st2b_labels"
 ST2B_PROMPTS_DIR = DATA_DIR / "st2b_prompts"
 PLANNER_PROMPTS_DIR = DATA_DIR / "prompts"
+
+# ── Unified Model (vision + planner on single Qwen3.5-9B) ────────────
+UNIFIED_CHECKPOINT_DIR = CHECKPOINT_DIR / "qwen35-lego-unified-lora"
+UNIFIED_LEARNING_RATE = 5e-5
+UNIFIED_NUM_EPOCHS = 5
+UNIFIED_WARMUP_STEPS = 300
+UNIFIED_BATCH_SIZE = 1
+UNIFIED_GRADIENT_ACCUMULATION = 32
+UNIFIED_MAX_SEQ_LENGTH = 2048  # 4096 OOMs on 32GB VRAM with 9B model
+VISION_UPSAMPLE = 10  # upsample vision samples to balance with planner data
+
+# ── Prompt Caching ────────────────────────────────────────────────────
+CACHE_ENABLED = os.environ.get("LEGOGEN_CACHE_ENABLED", "1") == "1"
+CACHE_KV_PREFIX_ENABLED = True       # Layer 1: KV-cache prefix reuse
+CACHE_RESPONSE_ENABLED = True        # Layer 2: Full response caching (note: do_sample=True means same prompt can produce different outputs; first result is cached)
+CACHE_TOKENIZATION_ENABLED = True    # Layer 3: Tokenization caching
+CACHE_RESPONSE_MAX_SIZE = 256        # Max cached responses
+CACHE_RESPONSE_TTL_SECONDS = 3600    # 1 hour TTL
 
 # ── Inference ──────────────────────────────────────────────────────────
 MAX_NEW_TOKENS = 1024
