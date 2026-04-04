@@ -1,4 +1,8 @@
-"""Qwen3-VL model wrapper with QLoRA for LEGO image-to-JSON fine-tuning."""
+"""Qwen3-VL model wrapper with QLoRA for LEGO image-to-JSON fine-tuning.
+
+DEPRECATED: For new training, use unified_model.py instead. This file is kept
+for backward compatibility with the checked-in qwen-lego-lora adapter.
+"""
 
 from pathlib import Path
 
@@ -56,7 +60,6 @@ class LegoVisionEncoder:
         )
 
         # ── Freeze vision encoder ──────────────────────────────────────
-        # Freeze by parameter name pattern (robust across transformers versions)
         for name, param in self.model.named_parameters():
             if "visual" in name or "vision" in name:
                 param.requires_grad = False

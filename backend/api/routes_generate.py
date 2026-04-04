@@ -1,5 +1,6 @@
 """FastAPI routes for LEGO image-to-JSON generation."""
 
+import hashlib
 import io
 from pathlib import Path
 
@@ -44,9 +45,12 @@ async def generate(
         else:
             raise HTTPException(status_code=400, detail="Could not read the uploaded image")
 
+    # Compute image hash for response caching
+    cache_key = hashlib.sha256(contents).hexdigest()
+
     # Run inference
     pipeline = get_pipeline()
-    result = pipeline.generate_build(pil_image)
+    result = pipeline.generate_build(pil_image, cache_key=cache_key)
 
     return result
 

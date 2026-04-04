@@ -111,7 +111,7 @@ class LegoDataset(Dataset):
                 messages, tokenize=False, add_generation_prompt=False
             )
 
-            # Process with the Qwen processor
+            # Process with the Qwen3-VL processor
             inputs = self.processor(
                 text=[text],
                 images=[image],
