@@ -10,15 +10,13 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backend.api.routes_generate import router as generate_router
+from backend.api.routes_validate import router as validate_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load the ML model on startup."""
-    print("Loading LEGOGen inference pipeline...")
-    from backend.inference.pipeline import get_pipeline
-    get_pipeline()  # Initialize singleton
-    print("Pipeline ready.")
+    """Startup/shutdown lifecycle. Models load lazily on first request."""
+    print("LEGOGen API ready. Models will load on first request.")
     yield
     print("Shutting down LEGOGen.")
 
@@ -33,13 +31,14 @@ app = FastAPI(
 # CORS — allow frontend dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(generate_router)
+app.include_router(validate_router)
 
 
 @app.get("/health")

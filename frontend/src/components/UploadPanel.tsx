@@ -31,19 +31,23 @@ const UploadPanel: React.FC<UploadPanelProps> = ({ onFileSelected }) => {
   };
 
   return (
-    <div 
-      className="relative border border-dashed border-gray-600 bg-gray-800 rounded-xl p-3 text-center hover:border-blue-500 hover:bg-gray-750 transition cursor-pointer group h-full flex flex-col items-center justify-center min-w-[80px] md:min-w-[100px]"
+    <div
+      className="relative border border-dashed border-gray-600 bg-gray-800 rounded-xl p-3 text-center hover:border-blue-500 hover:bg-gray-700 transition cursor-pointer group h-full flex flex-col items-center justify-center min-w-[80px] md:min-w-[100px]"
+      role="button"
+      tabIndex={0}
+      aria-label="Upload an image by clicking or dragging"
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
       onClick={handleClick}
-      title="Upload an image"
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleClick(); } }}
     >
-      <input 
-        type="file" 
-        ref={fileInputRef} 
-        onChange={handleFileChange} 
-        className="hidden" 
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleFileChange}
+        className="hidden"
         accept="image/*"
+        aria-label="Select image file"
       />
       <div className="text-2xl mb-1 group-hover:scale-110 transition-transform">📷</div>
       {fileName ? (

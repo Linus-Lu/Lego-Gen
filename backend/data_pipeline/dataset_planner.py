@@ -106,7 +106,8 @@ class PlannerDataset(Dataset):
 
         # Apply chat template
         text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False
+            messages, tokenize=False, add_generation_prompt=False,
+            enable_thinking=False,
         )
 
         # Tokenize
@@ -126,7 +127,8 @@ class PlannerDataset(Dataset):
         # Get prompt-only length (system + user, no assistant)
         prompt_messages = messages[:2]
         prompt_text = self.tokenizer.apply_chat_template(
-            prompt_messages, tokenize=False, add_generation_prompt=True
+            prompt_messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=False,
         )
         prompt_tokens = self.tokenizer(
             prompt_text, return_tensors="pt", truncation=True,
@@ -136,10 +138,10 @@ class PlannerDataset(Dataset):
 
         labels[:prompt_len] = -100
 
-        # Also mask padding
-        pad_token_id = self.tokenizer.pad_token_id
-        if pad_token_id is not None:
-            labels[labels == pad_token_id] = -100
+        # Mask padding using attention_mask (not pad_token_id, which equals
+        # eos_token_id and would also mask the legitimate end-of-sequence token)
+        attention_mask = inputs["attention_mask"]
+        labels[attention_mask == 0] = -100
 
         inputs["labels"] = labels
         return inputs

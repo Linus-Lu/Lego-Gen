@@ -1,4 +1,4 @@
-"""Qwen3 text-only model wrapper with QLoRA for LEGO text-to-JSON fine-tuning."""
+"""Qwen3.5-9B text-only model wrapper with QLoRA for LEGO text-to-JSON fine-tuning."""
 
 from pathlib import Path
 
@@ -14,10 +14,10 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from backend.config import (
     PLANNER_MODEL_NAME,
-    LORA_R,
-    LORA_ALPHA,
-    LORA_DROPOUT,
-    LORA_TARGET_MODULES,
+    PLANNER_LORA_R,
+    PLANNER_LORA_ALPHA,
+    PLANNER_LORA_DROPOUT,
+    PLANNER_LORA_TARGET_MODULES,
     QUANTIZATION_BITS,
     PLANNER_CHECKPOINT_DIR,
     USE_BF16,
@@ -25,7 +25,11 @@ from backend.config import (
 
 
 class LegoPlannerLM:
-    """Wraps Qwen3-8B with QLoRA adapters for text-to-JSON fine-tuning."""
+    """Wraps Qwen3.5-9B with QLoRA adapters for text-to-JSON fine-tuning.
+
+    Uses 'all-linear' target_modules to handle the hybrid DeltaNet/Attention
+    architecture where different layer types have different linear projection names.
+    """
 
     def __init__(
         self,
@@ -64,12 +68,12 @@ class LegoPlannerLM:
             self._apply_lora()
 
     def _apply_lora(self):
-        """Apply LoRA adapters to the language model layers."""
+        """Apply LoRA adapters to all linear layers (handles hybrid architecture)."""
         lora_config = LoraConfig(
-            r=LORA_R,
-            lora_alpha=LORA_ALPHA,
-            target_modules=LORA_TARGET_MODULES,
-            lora_dropout=LORA_DROPOUT,
+            r=PLANNER_LORA_R,
+            lora_alpha=PLANNER_LORA_ALPHA,
+            target_modules=PLANNER_LORA_TARGET_MODULES,
+            lora_dropout=PLANNER_LORA_DROPOUT,
             bias="none",
             task_type=TaskType.CAUSAL_LM,
         )

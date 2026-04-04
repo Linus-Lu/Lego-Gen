@@ -24,10 +24,7 @@ backend/models/checkpoints/
 *.pt
 
 # Data (generated, not source)
-data/images/
-data/cache/
-data/labels/
-data/splits.json
+data/
 
 # Logs & outputs
 logs/

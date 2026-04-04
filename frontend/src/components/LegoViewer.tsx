@@ -195,7 +195,7 @@ const LegoViewer: React.FC<LegoViewerProps> = ({ steps, currentStep }) => {
     return (
       <div className="w-full h-full bg-gray-800 rounded-lg flex items-center justify-center min-h-[300px] border-2 border-dashed border-gray-700">
         <div className="text-center text-gray-500">
-          <div className="text-5xl mb-2 opacity-50">🧊</div>
+          <div className="text-5xl mb-2 opacity-50" aria-hidden="true">🧊</div>
           <p className="font-medium">3D Interactive View</p>
           <p className="text-xs mt-2">Upload an image to see the 3D build</p>
         </div>
@@ -204,7 +204,7 @@ const LegoViewer: React.FC<LegoViewerProps> = ({ steps, currentStep }) => {
   }
 
   return (
-    <div className="w-full h-full rounded-lg overflow-hidden bg-[#1a1a2e]">
+    <div className="w-full h-full rounded-lg overflow-hidden bg-[#1a1a2e]" aria-label={`3D build viewer showing step ${currentStep} of ${steps.length}`}>
       <Canvas
         camera={{ position: [10, 8, 10], fov: 45 }}
         shadows

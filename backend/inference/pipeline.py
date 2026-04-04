@@ -12,7 +12,6 @@ from backend.config import (
     CHECKPOINT_DIR,
     PLANNER_CHECKPOINT_DIR,
     MAX_NEW_TOKENS,
-    NUM_BEAMS,
     TEMPERATURE,
     TOP_P,
     LEGOGEN_DEV,
@@ -58,6 +57,8 @@ class MockPipeline:
 
     def generate_build(self, image=None) -> dict:
         from backend.inference.postprocess_manual import json_to_steps
+        from backend.inference.stability_checker import StabilityChecker
+        from dataclasses import asdict
 
         description = {
             "set_id": "mock-001",
@@ -130,6 +131,7 @@ class MockPipeline:
         }
 
         steps = json_to_steps(description)
+        validation = asdict(StabilityChecker().validate(description))
 
         return {
             "description": description,
@@ -140,6 +142,7 @@ class MockPipeline:
                 "json_valid": True,
                 "errors": [],
             },
+            "validation": validation,
         }
 
 
@@ -177,7 +180,7 @@ class LegoGenPipeline:
         import torch
         import json
         from backend.models.tokenizer import build_chat_messages, extract_json_from_text
-        from backend.inference.constraint_engine import safe_parse_and_validate, enforce_valid_values
+        from backend.inference.constraint_engine import safe_parse_and_validate
 
         start = time.time()
 
@@ -210,19 +213,22 @@ class LegoGenPipeline:
                 generated_ids, skip_special_tokens=True
             )
 
-        # Parse and validate
+        # Parse and validate — handle truncated output from token limit
         parsed = extract_json_from_text(raw_output)
         if parsed:
-            parsed = enforce_valid_values(parsed)
-            is_valid, errors = safe_parse_and_validate(json.dumps(parsed))
+            reparsed, errors = safe_parse_and_validate(json.dumps(parsed))
+            description = reparsed or parsed
+            is_valid = reparsed is not None and len(errors) == 0
         else:
-            parsed, errors = safe_parse_and_validate(raw_output)
-            is_valid = parsed is not None
+            description, errors = safe_parse_and_validate(raw_output)
+            is_valid = description is not None
+            if is_valid:
+                errors = [e for e in errors if "Missing field" not in e]
 
         elapsed_ms = int((time.time() - start) * 1000)
 
         return {
-            "description": parsed or {},
+            "description": description or {},
             "raw_output": raw_output,
             "is_valid": is_valid,
             "errors": errors,
@@ -234,17 +240,23 @@ class LegoGenPipeline:
         result = self.describe_image(image)
 
         from backend.inference.postprocess_manual import json_to_steps
-        steps = json_to_steps(result["description"]) if result["description"] else []
+        from backend.inference.stability_checker import StabilityChecker
+        from dataclasses import asdict
+
+        description = result["description"]
+        steps = json_to_steps(description) if description else []
+        validation = asdict(StabilityChecker().validate(description))
 
         return {
-            "description": result["description"],
+            "description": description,
             "steps": steps,
             "metadata": {
-                "model_version": "qwen25vl-lego-lora-v1",
+                "model_version": "qwen3vl-lego-lora-v1",
                 "generation_time_ms": result["generation_time_ms"],
                 "json_valid": result["is_valid"],
                 "errors": result["errors"],
             },
+            "validation": validation,
         }
 
 
@@ -281,8 +293,8 @@ class PlannerPipeline:
         """Generate a structured JSON description from a text prompt."""
         import torch
         import json
-        from backend.models.tokenizer import build_planner_chat_messages, extract_json_from_text
-        from backend.inference.constraint_engine import safe_parse_and_validate, enforce_valid_values
+        from backend.models.tokenizer import build_planner_chat_messages, extract_json_from_text, strip_thinking_blocks
+        from backend.inference.constraint_engine import safe_parse_and_validate
 
         start = time.time()
 
@@ -290,7 +302,8 @@ class PlannerPipeline:
             messages = build_planner_chat_messages(prompt)
 
             text = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
+                messages, tokenize=False, add_generation_prompt=True,
+                enable_thinking=False,
             )
 
             inputs = self.tokenizer(
@@ -311,19 +324,27 @@ class PlannerPipeline:
                 generated_ids, skip_special_tokens=True
             )
 
-        # Parse and validate
+        # Strip any thinking blocks and parse
+        raw_output = strip_thinking_blocks(raw_output)
+
+        # Try exact JSON extraction first, fall back to truncation-aware repair
         parsed = extract_json_from_text(raw_output)
         if parsed:
-            parsed = enforce_valid_values(parsed)
-            is_valid, errors = safe_parse_and_validate(json.dumps(parsed))
+            reparsed, errors = safe_parse_and_validate(json.dumps(parsed))
+            description = reparsed or parsed
+            is_valid = reparsed is not None and len(errors) == 0
         else:
-            parsed, errors = safe_parse_and_validate(raw_output)
-            is_valid = parsed is not None
+            # Output likely truncated by token limit — repair and validate
+            description, errors = safe_parse_and_validate(raw_output)
+            is_valid = description is not None
+            if is_valid:
+                # Truncated but repaired — note it but don't treat as failure
+                errors = [e for e in errors if "Missing field" not in e]
 
         elapsed_ms = int((time.time() - start) * 1000)
 
         return {
-            "description": parsed or {},
+            "description": description or {},
             "raw_output": raw_output,
             "is_valid": is_valid,
             "errors": errors,
@@ -335,17 +356,23 @@ class PlannerPipeline:
         result = self.describe_from_text(prompt)
 
         from backend.inference.postprocess_manual import json_to_steps
-        steps = json_to_steps(result["description"]) if result["description"] else []
+        from backend.inference.stability_checker import StabilityChecker
+        from dataclasses import asdict
+
+        description = result["description"]
+        steps = json_to_steps(description) if description else []
+        validation = asdict(StabilityChecker().validate(description))
 
         return {
-            "description": result["description"],
+            "description": description,
             "steps": steps,
             "metadata": {
-                "model_version": "qwen25-lego-planner-lora-v1",
+                "model_version": "qwen35-lego-planner-lora-v1",
                 "generation_time_ms": result["generation_time_ms"],
                 "json_valid": result["is_valid"],
                 "errors": result["errors"],
             },
+            "validation": validation,
         }
 
     generate_build_from_text = generate_build

@@ -505,6 +505,7 @@ def main():
     rng = Random(args.seed)
     converted = 0
     skipped = 0
+    converted_ids = []
 
     for i, example in enumerate(dataset):
         label, prompts = convert_example(example, rng)
@@ -514,6 +515,7 @@ def main():
             continue
 
         sid = label["set_id"]
+        converted_ids.append(sid)
 
         # Save label
         label_path = ST2B_CONVERTED_DIR / f"{sid}.json"
@@ -533,11 +535,11 @@ def main():
     print(f"  Labels: {ST2B_CONVERTED_DIR}")
     print(f"  Prompts: {ST2B_PROMPTS_DIR}")
 
-    # Save split info for dataset loading
+    # Save split info for dataset loading (only IDs from this split's run)
     split_info = {
         "split": args.split,
         "count": converted,
-        "ids": [f.stem for f in sorted(ST2B_CONVERTED_DIR.glob("*.json"))],
+        "ids": converted_ids,
     }
     split_path = ST2B_CONVERTED_DIR.parent / f"st2b_{args.split}_split.json"
     with open(split_path, "w") as f:

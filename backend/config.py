@@ -26,7 +26,7 @@ SPLITS_FILE = DATA_DIR / "splits.json"
 
 # ── Model ──────────────────────────────────────────────────────────────
 MODEL_NAME = "Qwen/Qwen3-VL-8B-Instruct"
-MAX_SEQ_LENGTH = 1024
+MAX_SEQ_LENGTH = 4096
 
 # ── QLoRA ──────────────────────────────────────────────────────────────
 LORA_R = 32                # v1 was 16, higher rank = more capacity
@@ -37,8 +37,8 @@ QUANTIZATION_BITS = 4
 
 # ── Training ───────────────────────────────────────────────────────────
 LEARNING_RATE = 1e-4       # v1 was 2e-4, lower = more stable convergence
-BATCH_SIZE = 2
-GRADIENT_ACCUMULATION_STEPS = 16
+BATCH_SIZE = 1
+GRADIENT_ACCUMULATION_STEPS = 32
 NUM_EPOCHS = 3             # v2 was 10, reduced for faster iteration
 WARMUP_STEPS = 200         # v1 was 100, longer warmup for lower LR
 WEIGHT_DECAY = 0.01
@@ -49,12 +49,22 @@ SAVE_STEPS = 200
 SAVE_TOTAL_LIMIT = 3
 
 # ── Planner (text-to-JSON) ─────────────────────────────────────────
-PLANNER_MODEL_NAME = "Qwen/Qwen3-8B"
-PLANNER_CHECKPOINT_DIR = BACKEND_DIR / "models" / "checkpoints" / "qwen-lego-planner-lora"
+PLANNER_MODEL_NAME = "Qwen/Qwen3.5-9B"
+PLANNER_CHECKPOINT_DIR = BACKEND_DIR / "models" / "checkpoints" / "qwen35-lego-planner-lora"
 PLANNER_MAX_SEQ_LENGTH = 2048
-PLANNER_LEARNING_RATE = 5e-5
-PLANNER_NUM_EPOCHS = 3
-PLANNER_WARMUP_STEPS = 500
+PLANNER_LEARNING_RATE = 3e-5
+PLANNER_NUM_EPOCHS = 5
+PLANNER_WARMUP_STEPS = 300
+
+# ── Planner QLoRA (Qwen3.5-9B hybrid architecture) ────────────────
+PLANNER_LORA_R = 64
+PLANNER_LORA_ALPHA = 128
+PLANNER_LORA_DROPOUT = 0.05
+PLANNER_LORA_TARGET_MODULES = "all-linear"
+
+# ── Planner Training (RTX 5090 optimized) ─────────────────────────
+PLANNER_BATCH_SIZE = 2
+PLANNER_GRADIENT_ACCUMULATION = 8
 
 # ── StableText2Brick dataset ──────────────────────────────────────
 ST2B_DATASET = "AvaLovelace/StableText2Brick"
@@ -68,6 +78,13 @@ MAX_NEW_TOKENS = 1024
 NUM_BEAMS = 1
 TEMPERATURE = 0.7
 TOP_P = 0.9
+
+# ── Stability Checker Thresholds ──────────────────────────────────────
+QUANTITY_WARN_THRESHOLD = 50
+QUANTITY_FAIL_THRESHOLD = 200
+SUPPORT_RATIO_WARN = 3.0
+TOP_HEAVY_RATIO = 2.0
+MIN_CANTILEVER_CONNECTIONS = 2
 
 # ── Device ─────────────────────────────────────────────────────────────
 try:

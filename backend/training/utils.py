@@ -150,7 +150,7 @@ def compute_all_metrics(
 
 # ── Planner-specific metrics ──────────────────────────────────────────
 
-POSITION_ORDER = {"bottom": 0, "center": 1, "front": 2, "back": 2, "left": 2, "right": 2, "top": 3}
+from backend.inference.constraint_engine import POSITION_ORDER
 
 
 def compute_structural_coherence(pred: dict) -> float:

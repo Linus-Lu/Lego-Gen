@@ -5,6 +5,7 @@ import StepList from '../components/StepList';
 import StepDetail from '../components/StepDetail';
 import ColorLegend from '../components/ColorLegend';
 import LegoViewer from '../components/LegoViewer';
+import ValidationPanel from '../components/ValidationPanel';
 import { generateBuild, generateBuildFromText } from '../api/legogen';
 import type { GenerateResponse } from '../api/legogen';
 
@@ -33,6 +34,7 @@ const BuildSession: React.FC = () => {
 
   const [buildResult, setBuildResult] = useState<GenerateResponse | null>(null);
   const [currentStep, setCurrentStep] = useState(1);
+  const [activeTab, setActiveTab] = useState<'steps' | 'validation'>('steps');
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -78,39 +80,66 @@ const BuildSession: React.FC = () => {
       setBuildResult(result);
       setCurrentStep(1);
 
+      const desc = result.description;
+      const hasDescription = desc && desc.object;
+
       const resultMessage: Message = {
         role: 'assistant',
         type: 'manual-result',
-        content: (
+        content: hasDescription ? (
           <div className="w-full animate-fade-in space-y-3">
             <p className="font-medium">
               Here's your build plan for{' '}
-              <span className="text-gradient-warm font-bold">{result.description.object}</span>
+              <span className="text-gradient-warm font-bold">{desc.object}</span>
             </p>
             <div className="flex flex-wrap items-center gap-2 text-xs">
               <span className="px-2.5 py-1 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-300">
-                {result.description.total_parts} parts
+                {desc.total_parts ?? 0} parts
               </span>
               <span className="px-2.5 py-1 rounded-lg bg-purple-500/10 border border-purple-500/20 text-purple-300">
-                {result.description.complexity}
+                {desc.complexity ?? 'unknown'}
               </span>
               <span className="px-2.5 py-1 rounded-lg bg-green-500/10 border border-green-500/20 text-green-300">
                 {result.steps.length} steps
               </span>
+              {result.validation && (
+                <span className={`px-2.5 py-1 rounded-lg border ${
+                  result.validation.score >= 80
+                    ? 'bg-green-500/10 border-green-500/20 text-green-300'
+                    : result.validation.score >= 50
+                    ? 'bg-yellow-500/10 border-yellow-500/20 text-yellow-300'
+                    : 'bg-red-500/10 border-red-500/20 text-red-300'
+                }`}>
+                  Stability: {result.validation.score}/100
+                </span>
+              )}
               <span className="text-gray-600 ml-1">
                 {result.metadata.generation_time_ms}ms
               </span>
             </div>
-            {result.description.build_hints.length > 0 && (
+            {(desc.build_hints?.length ?? 0) > 0 && (
               <div className="text-xs text-gray-500 leading-relaxed">
-                {result.description.build_hints.join(' · ')}
+                {desc.build_hints.join(' · ')}
               </div>
             )}
+          </div>
+        ) : (
+          <div className="w-full animate-fade-in space-y-2">
+            <p className="font-medium text-yellow-400">Generation produced an incomplete result</p>
+            <p className="text-sm text-gray-400">
+              The model output could not be parsed into a valid build description.
+              {result.metadata.errors.length > 0 && (
+                <span className="block mt-1 text-xs text-gray-500">
+                  {result.metadata.errors.slice(0, 3).join('; ')}
+                </span>
+              )}
+            </p>
           </div>
         ),
       };
       setMessages((prev) => [...prev, resultMessage]);
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const errorText = err instanceof Error ? err.message : 'Failed to generate instructions.';
       const errorMessage: Message = {
         role: 'assistant',
         type: 'error',
@@ -121,7 +150,7 @@ const BuildSession: React.FC = () => {
             </div>
             <div>
               <p className="font-medium">Something went wrong</p>
-              <p className="text-sm mt-1 text-red-400/70">{err.message || 'Failed to generate instructions.'}</p>
+              <p className="text-sm mt-1 text-red-400/70">{errorText}</p>
             </div>
           </div>
         ),
@@ -175,7 +204,7 @@ const BuildSession: React.FC = () => {
           ))}
 
           {/* Build viewer panel */}
-          {buildResult && !isLoading && (
+          {buildResult && !isLoading && buildResult.steps.length > 0 && (
             <div className="w-full py-4 px-4 md:px-6 animate-scale-in">
               <div className="max-w-6xl mx-auto">
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 h-[580px]">
@@ -186,20 +215,67 @@ const BuildSession: React.FC = () => {
 
                   {/* Side panel */}
                   <div className="flex flex-col gap-2 glass rounded-2xl p-3 overflow-hidden">
-                    <div className="flex-grow overflow-y-auto min-h-0">
-                      <StepList
-                        steps={buildResult.steps}
-                        currentStep={currentStep}
-                        onStepSelect={setCurrentStep}
-                      />
+                    {/* Tab bar */}
+                    <div className="flex gap-1 border-b border-white/5 pb-2 flex-shrink-0" role="tablist" aria-label="Build details">
+                      <button
+                        role="tab"
+                        aria-selected={activeTab === 'steps'}
+                        aria-controls="panel-steps"
+                        onClick={() => setActiveTab('steps')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                          activeTab === 'steps'
+                            ? 'bg-blue-500/15 text-blue-300 border border-blue-500/20'
+                            : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'
+                        }`}
+                      >
+                        Steps
+                      </button>
+                      <button
+                        role="tab"
+                        aria-selected={activeTab === 'validation'}
+                        aria-controls="panel-validation"
+                        onClick={() => setActiveTab('validation')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 ${
+                          activeTab === 'validation'
+                            ? 'bg-blue-500/15 text-blue-300 border border-blue-500/20'
+                            : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'
+                        }`}
+                      >
+                        Validation
+                        {buildResult.validation && (
+                          <span
+                            className={`inline-block w-2 h-2 rounded-full ${
+                              buildResult.validation.score >= 80 ? 'bg-green-400' :
+                              buildResult.validation.score >= 50 ? 'bg-yellow-400' : 'bg-red-400'
+                            }`}
+                            aria-label={`Score: ${buildResult.validation.score}`}
+                          />
+                        )}
+                      </button>
                     </div>
-                    <div className="border-t border-white/5 max-h-[200px] overflow-y-auto">
-                      <StepDetail step={buildResult.steps[currentStep - 1] ?? null} />
-                    </div>
-                    <ColorLegend
-                      dominantColors={buildResult.description.dominant_colors}
-                      allParts={buildResult.steps.flatMap((s) => s.parts)}
-                    />
+
+                    {activeTab === 'steps' ? (
+                      <div id="panel-steps" role="tabpanel" aria-labelledby="tab-steps" className="contents">
+                        <div className="flex-grow overflow-y-auto min-h-0">
+                          <StepList
+                            steps={buildResult.steps}
+                            currentStep={currentStep}
+                            onStepSelect={setCurrentStep}
+                          />
+                        </div>
+                        <div className="border-t border-white/5 max-h-[200px] overflow-y-auto">
+                          <StepDetail step={buildResult.steps[currentStep - 1] ?? null} />
+                        </div>
+                        <ColorLegend
+                          dominantColors={buildResult.description.dominant_colors ?? []}
+                          allParts={buildResult.steps.flatMap((s) => s.parts)}
+                        />
+                      </div>
+                    ) : (
+                      <div id="panel-validation" role="tabpanel" aria-labelledby="tab-validation" className="flex-grow overflow-y-auto min-h-0">
+                        <ValidationPanel validation={buildResult.validation} />
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -236,6 +312,7 @@ const BuildSession: React.FC = () => {
               <span className="max-w-[200px] truncate">{selectedFile.name}</span>
               <button
                 onClick={() => setSelectedFile(null)}
+                aria-label="Remove selected file"
                 className="ml-1 text-gray-400 hover:text-white rounded-full w-4 h-4 flex items-center justify-center hover:bg-white/10 transition"
               >
                 <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
@@ -261,6 +338,7 @@ const BuildSession: React.FC = () => {
             <button
               onClick={handleSendMessage}
               disabled={isLoading || (!input.trim() && !selectedFile)}
+              aria-label="Send message"
               className="absolute right-2 bottom-2 p-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-30 disabled:bg-gray-600 disabled:hover:bg-gray-600 transition-all active:scale-95"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>

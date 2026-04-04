@@ -1,6 +1,6 @@
 # LEGOGen
 
-AI-powered LEGO set generator that creates step-by-step building instructions from images or text prompts. Upload a photo of any object or describe what you want to build, and LEGOGen designs a complete LEGO model with real part IDs, color assignments, spatial layout, and an interactive 3D build viewer.
+AI-powered LEGO set generator that creates step-by-step building instructions from images or text prompts. Upload a photo of any object or describe what you want to build, and LEGOGen designs a complete LEGO model with real part IDs, color assignments, subassembly-level spatial relationships, and an interactive 3D build viewer.
 
 ## Architecture
 
@@ -14,8 +14,8 @@ Image / Text Prompt
   V2        V3
   Vision    Planner
   Encoder   LM
-  (Qwen3    (Qwen3
-   -VL-8B)   -8B)
+  (Qwen3    (Qwen3.5
+   -VL-8B)   -9B)
   |         |
   +----+----+
        |
@@ -33,15 +33,15 @@ Image / Text Prompt
 | Model | Task | Base | Training Data |
 |-------|------|------|---------------|
 | **V2 Vision Encoder** | Image -> JSON | Qwen3-VL-8B-Instruct | 1.9k Rebrickable sets with images |
-| **V3 Planner LM** | Text -> JSON | Qwen3-8B | 1.9k Rebrickable (3x upsampled) + 41k StableText2Brick |
+| **V3 Planner LM** | Text -> JSON | Qwen3.5-9B | 1.9k Rebrickable (3x upsampled) + 41k StableText2Brick |
 
-Both models are fine-tuned with **QLoRA** (4-bit NF4 quantization, LoRA rank 32, alpha 64) targeting attention + MLP layers (`q/k/v/o_proj`, `gate/up/down_proj`).
+Both models are fine-tuned with **QLoRA** (4-bit NF4 quantization). Vision encoder uses LoRA rank 32/alpha 64 on attention + MLP layers. Planner uses LoRA rank 64/alpha 128 with `all-linear` targeting for Qwen3.5's hybrid DeltaNet/Attention architecture.
 
 ## Features
 
 - **Image-to-Build**: Upload any image (photo, drawing, existing LEGO set) and get a full LEGO build plan
 - **Text-to-Build**: Describe what you want ("Build me a red sports car") and get a complete parts list and instructions
-- **Interactive 3D Viewer**: Step-by-step build animation with color-coded bricks, orbit controls, and transparency support
+- **Interactive 3D Viewer**: Step-by-step build visualization with color-coded bricks, orbit controls, and transparency support (schematic layout — not exact brick geometry)
 - **Real Part IDs**: Uses actual LEGO part numbers from the Rebrickable catalog
 - **JSON Validation & Repair**: Constraint engine validates model outputs against a strict schema and auto-repairs common issues
 - **Diverse Prompt Training**: 17 prompt templates with color-aware variants for robust text understanding
@@ -81,13 +81,15 @@ The models produce structured JSON with:
 backend/
   api/
     routes_generate.py       # POST /api/generate (image), /api/generate-from-text
+    routes_validate.py       # POST /api/validate (build stability/legality check)
   models/
     vision_encoder.py        # Qwen3-VL + QLoRA wrapper
-    planner_lm.py            # Qwen3-8B + QLoRA wrapper
+    planner_lm.py            # Qwen3.5-9B + QLoRA wrapper
     tokenizer.py             # Prompt templates, JSON parsing, chat message builders
   inference/
     pipeline.py              # LegoGenPipeline (image) + PlannerPipeline (text) + MockPipeline (dev)
     constraint_engine.py     # Schema validation, JSON repair, value enforcement
+    stability_checker.py     # Build stability/legality checker (10 checks, 0-100 scoring)
     postprocess_manual.py    # Convert JSON descriptions to ordered build steps
   data_pipeline/
     dataset.py               # Vision dataset (image-JSON pairs with augmentation)
@@ -114,6 +116,7 @@ frontend/
       StepList.tsx           # Step navigation sidebar
       StepDetail.tsx         # Current step parts and instructions
       LegoViewer.tsx         # Three.js 3D progressive build viewer
+      ValidationPanel.tsx    # Build stability/legality validation results
       ColorLegend.tsx        # Color key display
     api/
       legogen.ts             # API client (generateBuild, generateBuildFromText)
@@ -159,8 +162,8 @@ python scripts/prepare_planner_prompts.py
 # V2: Image-to-JSON (Qwen3-VL + QLoRA)
 python -m backend.training.train_vision --epochs 3 --batch-size 2
 
-# V3: Text-to-JSON (Qwen3-8B + QLoRA)
-python -m backend.training.train_planner --epochs 3 --batch-size 4
+# V3: Text-to-JSON (Qwen3.5-9B + QLoRA)
+python -m backend.training.train_planner --epochs 5 --batch-size 2
 ```
 
 Both scripts support `--resume <checkpoint-path>` to continue from a saved checkpoint and `--no-wandb` to disable W&B logging.
@@ -197,16 +200,19 @@ cd frontend && npm run dev
 
 | Param | Value |
 |-------|-------|
-| Base model | Qwen3-8B |
-| LoRA rank / alpha | 32 / 64 |
-| Learning rate | 5e-5 (cosine schedule) |
+| Base model | Qwen3.5-9B |
+| LoRA rank / alpha | 64 / 128 |
+| LoRA targets | all-linear (hybrid DeltaNet/Attention) |
+| Learning rate | 3e-5 (cosine schedule) |
 | Batch size | 2 (grad accum 8, effective 16) |
-| Epochs | 3 |
-| Warmup | 500 steps |
+| Epochs | 5 |
+| Warmup | 300 steps |
 | Quantization | 4-bit NF4 |
 | Training data | ~47k samples (Rebrickable 3x upsampled + StableText2Brick) |
 
 ### Evaluation Metrics
+
+Computed during evaluation steps via `compute_metrics` in both training scripts:
 
 - **JSON Validity Rate**: % of outputs that parse as valid JSON
 - **Field Accuracy**: Exact match on category, subcategory, complexity
@@ -220,14 +226,22 @@ cd frontend && npm run dev
 Upload an image to generate a LEGO build plan.
 
 - **Body**: `multipart/form-data` with `image` file and optional `prompt` string
-- **Response**: `{description, steps[], metadata: {model_version, generation_time_ms, json_valid, errors}}`
+- **Response**: `{description, steps[], metadata: {model_version, generation_time_ms, json_valid, errors}, validation: {score, checks[], summary}}`
 
 ### `POST /api/generate-from-text`
 
 Generate a LEGO build plan from a text description.
 
-- **Body**: `application/json` with `{prompt: string}`
+- **Body**: `multipart/form-data` with `prompt` string
 - **Response**: Same as above
+
+### `POST /api/validate`
+
+Validate an existing LEGO build description for structural stability and part legality.
+
+- **Body**: `application/json` with a `LegoDescription` object
+- **Response**: `{score: 0-100, checks: [{name, category, status, message, details?}], summary}`
+- **Check categories**: `legality` (part existence, compatibility, colors, quantities) and `stability` (foundation, connectivity, support ratio, build order, center of mass, cantilever)
 
 ### `GET /health`
 
@@ -239,18 +253,18 @@ Health check endpoint.
 |-------|-----------|
 | Frontend | React 19, TypeScript, Tailwind CSS, Three.js, React-Three-Fiber, Vite |
 | Backend | FastAPI, Python 3.11 |
-| Models | Qwen3-VL-8B, Qwen3-8B, QLoRA, BitsAndBytes |
+| Models | Qwen3-VL-8B, Qwen3.5-9B, QLoRA, BitsAndBytes |
 | Training | HuggingFace Transformers + Trainer, PEFT, W&B |
 | Data | Rebrickable database, StableText2Brick (HuggingFace) |
 
 ## What's New in V3
 
 - **Qwen3-VL-8B vision model** replacing Qwen2.5-VL-7B for image-to-JSON generation
-- **Qwen3-8B planner model** for text-to-JSON generation
-- **StableText2Brick integration**: 41k additional training examples with real 3D brick placements
-- **Expanded LoRA**: rank 16 -> 32, targeting MLP layers (gate/up/down_proj) in addition to attention
-- **Lower learning rates** (2e-4 -> 1e-4 for vision, 5e-5 for planner) for more stable convergence
-- **Optimized training**: 3 epochs with larger batch sizes for faster iteration
+- **Qwen3.5-9B planner model** with hybrid DeltaNet/Attention architecture for text-to-JSON generation
+- **StableText2Brick integration**: 41k additional training examples (per-brick coordinates are aggregated into subassembly-level descriptions during conversion)
+- **Expanded LoRA**: rank 64/alpha 128 with `all-linear` targeting for Qwen3.5's hybrid layers
+- **Lower learning rates** (2e-4 -> 1e-4 for vision, 3e-5 for planner) for more stable convergence
+- **Optimized training**: 5 epochs, batch 2 with grad accum 8 (effective 16), gradient checkpointing enabled (RTX 5090)
 - **Prompt diversity**: 17 template variants with color-aware prompts and curriculum rotation
 - **Gradient checkpointing fix**: `enable_input_require_grads()` for QLoRA + gradient checkpointing compatibility
 - **Dual pipeline**: Independent vision and planner inference paths with shared constraint engine

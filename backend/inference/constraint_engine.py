@@ -26,6 +26,9 @@ VALID_POSITIONS = {"top", "bottom", "left", "right", "center", "front", "back"}
 VALID_ORIENTATIONS = {"flat", "upright", "angled"}
 VALID_DIMENSIONS = {"small", "medium", "large"}
 
+# Canonical position ordering (lower = earlier in build)
+POSITION_ORDER = {"bottom": 0, "center": 1, "front": 2, "back": 2, "left": 2, "right": 2, "top": 3}
+
 
 def validate_lego_json(data: dict) -> tuple[bool, list[str]]:
     """Validate a JSON description against the LEGO schema.
@@ -68,21 +71,41 @@ def validate_lego_json(data: dict) -> tuple[bool, list[str]]:
 
 
 def repair_json_string(raw: str) -> str:
-    """Attempt to repair malformed JSON string."""
+    """Attempt to repair malformed or truncated JSON string.
+
+    Handles output truncated by token limits (common with long LEGO JSONs)
+    as well as minor formatting issues like trailing commas.
+    """
+    import re
+
+    # Try json_repair library first (best results)
     try:
         import json_repair
         return json_repair.repair_json(raw)
     except ImportError:
-        # Manual basic repairs
-        repaired = raw.strip()
-        # Fix trailing commas
-        repaired = repaired.replace(",]", "]").replace(",}", "}")
-        # Ensure closing braces
-        open_braces = repaired.count("{") - repaired.count("}")
-        repaired += "}" * max(0, open_braces)
-        open_brackets = repaired.count("[") - repaired.count("]")
-        repaired += "]" * max(0, open_brackets)
-        return repaired
+        pass
+
+    # Manual repair for truncated / malformed JSON
+    repaired = raw.strip()
+
+    # Fix trailing commas before closing brackets
+    repaired = re.sub(r',\s*]', ']', repaired)
+    repaired = re.sub(r',\s*}', '}', repaired)
+
+    # Strip trailing comma at end of string (truncation artifact)
+    repaired = re.sub(r',\s*$', '', repaired)
+
+    # Close any open string literal
+    if repaired.count('"') % 2 == 1:
+        repaired += '"'
+
+    # Close unclosed brackets then braces (order matters for valid JSON)
+    open_brackets = repaired.count("[") - repaired.count("]")
+    repaired += "]" * max(0, open_brackets)
+    open_braces = repaired.count("{") - repaired.count("}")
+    repaired += "}" * max(0, open_braces)
+
+    return repaired
 
 
 def enforce_valid_values(data: dict) -> dict:
@@ -146,10 +169,9 @@ def repair_connects_to(data: dict) -> dict:
 
 def validate_structural_order(data: dict) -> list[str]:
     """Check that subassemblies follow a bottom-to-top ordering."""
-    position_order = {"bottom": 0, "center": 1, "front": 2, "back": 2, "left": 2, "right": 2, "top": 3}
     warnings = []
     subs = data.get("subassemblies", [])
-    orders = [position_order.get(sa.get("spatial", {}).get("position", "center"), 1) for sa in subs]
+    orders = [POSITION_ORDER.get(sa.get("spatial", {}).get("position", "center"), 1) for sa in subs]
     if orders != sorted(orders):
         warnings.append("Subassemblies are not ordered bottom-to-top")
     return warnings

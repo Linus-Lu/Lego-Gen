@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Fine-tune Qwen3-8B with QLoRA on LEGO text-to-JSON dataset.
+"""Fine-tune Qwen3.5-9B with QLoRA on LEGO text-to-JSON dataset.
 
 Trains on combined Rebrickable (1.6k upsampled) + StableText2Brick (40k) data.
 
 Usage:
     python -m backend.training.train_planner
-    python -m backend.training.train_planner --resume checkpoints/qwen-lego-planner-lora/checkpoint-400
+    python -m backend.training.train_planner --resume checkpoints/qwen35-lego-planner-lora/checkpoint-400
 """
 
 import argparse
@@ -31,7 +31,8 @@ from backend.config import (
     PLANNER_LEARNING_RATE,
     PLANNER_NUM_EPOCHS,
     PLANNER_WARMUP_STEPS,
-    BATCH_SIZE,
+    PLANNER_BATCH_SIZE,
+    PLANNER_GRADIENT_ACCUMULATION,
     WEIGHT_DECAY,
     LOGGING_STEPS,
     EVAL_STEPS,
@@ -40,7 +41,6 @@ from backend.config import (
     USE_BF16,
 )
 from backend.models.planner_lm import LegoPlannerLM
-from backend.models.tokenizer import sample_prompt_template
 from backend.data_pipeline.dataset_planner import (
     PlannerDataset,
     load_planner_splits,
@@ -49,20 +49,22 @@ from backend.training.utils import (
     seed_everything,
     setup_wandb,
     compute_json_validity_rate,
+    compute_all_metrics,
 )
+from backend.models.tokenizer import decode_and_parse
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train Qwen3 LoRA for LEGO text-to-JSON")
+    parser = argparse.ArgumentParser(description="Train Qwen3.5-9B LoRA for LEGO text-to-JSON")
     parser.add_argument("--data-dir", type=str, default=str(DATA_DIR))
     parser.add_argument("--output-dir", type=str, default=str(PLANNER_CHECKPOINT_DIR))
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint path")
     parser.add_argument("--epochs", type=int, default=PLANNER_NUM_EPOCHS)
-    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--batch-size", type=int, default=PLANNER_BATCH_SIZE)
     parser.add_argument("--lr", type=float, default=PLANNER_LEARNING_RATE)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-wandb", action="store_true")
-    parser.add_argument("--gradient-accumulation", type=int, default=8)
+    parser.add_argument("--gradient-accumulation", type=int, default=PLANNER_GRADIENT_ACCUMULATION)
     return parser.parse_args()
 
 
@@ -78,6 +80,41 @@ class EpochUpdateCallback(TrainerCallback):
         print(f"  Epoch {epoch}: updated dataset prompt rotation")
 
 
+def build_compute_metrics(tokenizer):
+    """Build a compute_metrics function for the Trainer."""
+
+    def compute_metrics(eval_preds):
+        preds, labels = eval_preds
+        # preds are raw logits [batch, seq, vocab] — argmax to get token IDs
+        if preds.ndim == 3:
+            preds = preds.argmax(axis=-1)
+        pred_strs = tokenizer.batch_decode(preds, skip_special_tokens=True)
+
+        validity = compute_json_validity_rate(pred_strs)
+
+        pred_dicts = []
+        for pred_str in pred_strs:
+            parsed = decode_and_parse(
+                tokenizer.encode(pred_str), tokenizer
+            )
+            pred_dicts.append(parsed if parsed else {})
+
+        labels[labels == -100] = tokenizer.pad_token_id
+        label_strs = tokenizer.batch_decode(labels, skip_special_tokens=True)
+        ref_dicts = []
+        for label_str in label_strs:
+            parsed = decode_and_parse(
+                tokenizer.encode(label_str), tokenizer
+            )
+            ref_dicts.append(parsed if parsed else {})
+
+        metrics = compute_all_metrics(pred_dicts, ref_dicts)
+        metrics["json_validity_rate"] = validity
+        return metrics
+
+    return compute_metrics
+
+
 def main():
     args = parse_args()
     seed_everything(args.seed)
@@ -87,7 +124,7 @@ def main():
         setup_wandb("legogen-planner", config=vars(args))
 
     # ── Model ──────────────────────────────────────────────────────────
-    print("Loading Qwen3-8B with QLoRA...")
+    print("Loading Qwen3.5-9B with QLoRA...")
     planner = LegoPlannerLM(
         model_name=PLANNER_MODEL_NAME,
         load_adapter=args.resume if args.resume else None,
@@ -147,6 +184,7 @@ def main():
         report_to="wandb" if not args.no_wandb else "none",
         dataloader_num_workers=4,
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         remove_unused_columns=False,
     )
 
@@ -156,6 +194,7 @@ def main():
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=val_ds,
+        compute_metrics=build_compute_metrics(tokenizer),
         callbacks=[EpochUpdateCallback(train_ds)],
     )
 

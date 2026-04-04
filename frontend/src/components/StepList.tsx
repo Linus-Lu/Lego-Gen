@@ -17,14 +17,17 @@ const StepList: React.FC<StepListProps> = ({ steps, currentStep, onStepSelect })
         const isDone = step.step_number < currentStep;
 
         // Get unique colors for this step (max 5 dots)
-        const uniqueColors = [...new Set(step.parts.map((p) => p.color_hex))].slice(0, 5);
-        const extraColors = new Set(step.parts.map((p) => p.color_hex)).size - 5;
+        const allUniqueColors = [...new Set(step.parts.map((p) => p.color_hex))];
+        const uniqueColors = allUniqueColors.slice(0, 5);
+        const extraColors = Math.max(0, allUniqueColors.length - 5);
 
         return (
-          <div
+          <button
             key={step.step_number}
             onClick={() => onStepSelect(step.step_number)}
-            className={`p-3 border rounded-lg cursor-pointer transition flex items-start gap-3 ${
+            aria-label={`Step ${step.step_number}: ${step.title}${isActive ? ' (current)' : isDone ? ' (completed)' : ''}`}
+            aria-current={isActive ? 'step' : undefined}
+            className={`p-3 border rounded-lg cursor-pointer transition flex items-start gap-3 w-full text-left ${
               isActive
                 ? 'border-blue-500 bg-blue-900/30 ring-1 ring-blue-500/50'
                 : isDone
@@ -69,7 +72,7 @@ const StepList: React.FC<StepListProps> = ({ steps, currentStep, onStepSelect })
                 </span>
               </div>
             </div>
-          </div>
+          </button>
         );
       })}
     </div>

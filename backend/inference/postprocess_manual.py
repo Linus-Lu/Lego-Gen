@@ -4,9 +4,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-
-# ── Build order priority (lower = earlier in build) ────────────────────
-POSITION_ORDER = {"bottom": 0, "center": 1, "front": 2, "back": 2, "left": 2, "right": 2, "top": 3}
+from backend.inference.constraint_engine import POSITION_ORDER
 
 
 def json_to_steps(description: dict) -> list[dict]:

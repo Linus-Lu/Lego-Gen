@@ -62,7 +62,13 @@ class LegoDataset(Dataset):
         for ext in (".jpg", ".jpeg", ".png", ".webp"):
             path = self.images_dir / f"{set_num}{ext}"
             if path.exists():
-                return path
+                # Verify image is readable
+                try:
+                    img = Image.open(path)
+                    img.verify()
+                    return path
+                except Exception:
+                    continue
         return None
 
     def __len__(self) -> int:
@@ -81,7 +87,7 @@ class LegoDataset(Dataset):
         # Load JSON label
         with open(label_path, "r") as f:
             label = json.load(f)
-        label_text = json.dumps(label, indent=2)
+        label_text = json.dumps(label)
 
         if self.processor is not None:
             # Build chat messages for Qwen3-VL

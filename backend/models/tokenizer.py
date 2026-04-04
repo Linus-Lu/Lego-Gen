@@ -28,7 +28,8 @@ PLANNER_SYSTEM_PROMPT = (
     "Output fields: set_id, object, category, subcategory, complexity, total_parts, "
     "dominant_colors, dimensions_estimate, subassemblies (each with name, type, "
     "parts list with part_id/name/category/color/color_hex/is_trans/quantity, "
-    "and spatial info including position/orientation/connects_to), and build_hints."
+    "and spatial info including position/orientation/connects_to), and build_hints. "
+    "/no_think"
 )
 
 PROMPT_TEMPLATES = [
@@ -157,6 +158,12 @@ def decode_and_parse(token_ids, tokenizer) -> dict | None:
     """Decode token IDs back to a string, extract JSON, and parse it."""
     raw = tokenizer.decode(token_ids, skip_special_tokens=True)
     return extract_json_from_text(raw)
+
+
+def strip_thinking_blocks(text: str) -> str:
+    """Remove <think>...</think> blocks from model output."""
+    import re
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
 def extract_json_from_text(text: str) -> dict | None:
