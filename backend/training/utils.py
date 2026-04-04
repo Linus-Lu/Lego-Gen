@@ -146,3 +146,88 @@ def compute_all_metrics(
     metrics["parts_f1"] = np.mean(parts_f1s) if parts_f1s else 0.0
 
     return metrics
+
+
+# ── Planner-specific metrics ──────────────────────────────────────────
+
+from backend.inference.constraint_engine import POSITION_ORDER
+
+
+def compute_structural_coherence(pred: dict) -> float:
+    """Score structural coherence: bottom-to-top ordering + valid connects_to refs."""
+    subs = pred.get("subassemblies", [])
+    if not subs:
+        return 0.0
+
+    score = 0.0
+    checks = 0
+
+    # Check bottom-to-top ordering
+    positions = [sa.get("spatial", {}).get("position", "center") for sa in subs]
+    orders = [POSITION_ORDER.get(p, 1) for p in positions]
+    if orders == sorted(orders):
+        score += 1.0
+    checks += 1
+
+    # Check at least one bottom subassembly
+    if "bottom" in positions:
+        score += 1.0
+    checks += 1
+
+    # Check connects_to references are valid subassembly names
+    valid_names = {sa.get("name", "") for sa in subs}
+    for sa in subs:
+        connects = sa.get("spatial", {}).get("connects_to", [])
+        checks += 1
+        if all(c in valid_names for c in connects):
+            score += 1.0
+
+    return score / checks if checks > 0 else 0.0
+
+
+def compute_part_realism(pred: dict, known_part_ids: set[str]) -> float:
+    """Fraction of predicted part_ids that exist in the Rebrickable catalog."""
+    if not known_part_ids:
+        return 0.0
+
+    total = 0
+    valid = 0
+    for sa in pred.get("subassemblies", []):
+        for part in sa.get("parts", []):
+            total += 1
+            if part.get("part_id", "") in known_part_ids:
+                valid += 1
+
+    return valid / total if total > 0 else 0.0
+
+
+def compute_build_feasibility(pred: dict) -> float:
+    """Score build feasibility: parts count consistency, reasonable subassembly count."""
+    score = 0.0
+    checks = 0
+
+    # Check total_parts matches sum of quantities
+    claimed_total = pred.get("total_parts", 0)
+    actual_total = sum(
+        p.get("quantity", 1)
+        for sa in pred.get("subassemblies", [])
+        for p in sa.get("parts", [])
+    )
+    checks += 1
+    if claimed_total > 0 and abs(claimed_total - actual_total) <= max(2, claimed_total * 0.1):
+        score += 1.0
+
+    # Check reasonable subassembly count
+    num_subs = len(pred.get("subassemblies", []))
+    checks += 1
+    if 1 <= num_subs <= 10:
+        score += 1.0
+
+    # Check each subassembly has at least one part
+    checks += 1
+    if num_subs > 0 and all(
+        len(sa.get("parts", [])) > 0 for sa in pred.get("subassemblies", [])
+    ):
+        score += 1.0
+
+    return score / checks if checks > 0 else 0.0

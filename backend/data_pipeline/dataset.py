@@ -1,4 +1,4 @@
-"""PyTorch Dataset for Qwen2.5-VL fine-tuning on LEGO image-JSON pairs."""
+"""PyTorch Dataset for Qwen3-VL fine-tuning on LEGO image-JSON pairs."""
 
 import json
 from pathlib import Path
@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from backend.config import DATA_DIR, MAX_SEQ_LENGTH
 from backend.models.tokenizer import SYSTEM_PROMPT, USER_PROMPT
 
-IMAGE_SIZE = 448  # Qwen2.5-VL dynamic resolution, but we resize for augmentation
+IMAGE_SIZE = 448  # Qwen3-VL dynamic resolution, but we resize for augmentation
 
 # ── Augmentation transforms ───────────────────────────────────────────
 
@@ -62,7 +62,13 @@ class LegoDataset(Dataset):
         for ext in (".jpg", ".jpeg", ".png", ".webp"):
             path = self.images_dir / f"{set_num}{ext}"
             if path.exists():
-                return path
+                # Verify image is readable
+                try:
+                    img = Image.open(path)
+                    img.verify()
+                    return path
+                except Exception:
+                    continue
         return None
 
     def __len__(self) -> int:
@@ -81,10 +87,10 @@ class LegoDataset(Dataset):
         # Load JSON label
         with open(label_path, "r") as f:
             label = json.load(f)
-        label_text = json.dumps(label, indent=2)
+        label_text = json.dumps(label)
 
         if self.processor is not None:
-            # Build chat messages for Qwen2.5-VL
+            # Build chat messages for Qwen3-VL
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {

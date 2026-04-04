@@ -6,7 +6,7 @@ interface ColorLegendProps {
   allParts: Part[];
 }
 
-const ColorLegend: React.FC<ColorLegendProps> = ({ dominantColors, allParts }) => {
+const ColorLegend: React.FC<ColorLegendProps> = ({ dominantColors = [], allParts = [] }) => {
   const [expanded, setExpanded] = useState(false);
 
   // Build color summary: hex -> { name, count, is_trans }
@@ -30,6 +30,8 @@ const ColorLegend: React.FC<ColorLegendProps> = ({ dominantColors, allParts }) =
     <div className="border-t border-gray-700 pt-2">
       <button
         onClick={() => setExpanded(!expanded)}
+        aria-expanded={expanded}
+        aria-label={`Color palette with ${allColors.length} colors`}
         className="flex items-center justify-between w-full text-[10px] uppercase tracking-wider text-gray-500 font-semibold hover:text-gray-300 transition px-1"
       >
         <span>Color Palette ({allColors.length})</span>

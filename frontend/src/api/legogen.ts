@@ -42,6 +42,20 @@ export interface LegoDescription {
   build_hints: string[];
 }
 
+export interface CheckResult {
+  name: string;
+  category: "legality" | "stability";
+  status: "pass" | "warn" | "fail";
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export interface ValidationReport {
+  score: number;
+  checks: CheckResult[];
+  summary: string;
+}
+
 export interface GenerateResponse {
   description: LegoDescription;
   steps: BuildStep[];
@@ -51,6 +65,7 @@ export interface GenerateResponse {
     json_valid: boolean;
     errors: string[];
   };
+  validation?: ValidationReport;
 }
 
 // ── API client ────────────────────────────────────────────────────────
@@ -72,6 +87,42 @@ export async function generateBuild(
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: "Request failed" }));
+    throw new Error(err.detail ?? `HTTP ${res.status}`);
+  }
+
+  return res.json();
+}
+
+export async function generateBuildFromText(
+  prompt: string
+): Promise<GenerateResponse> {
+  const form = new FormData();
+  form.append("prompt", prompt);
+
+  const res = await fetch(`${API_BASE}/api/generate-from-text`, {
+    method: "POST",
+    body: form,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Request failed" }));
+    throw new Error(err.detail ?? `HTTP ${res.status}`);
+  }
+
+  return res.json();
+}
+
+export async function validateBuild(
+  description: LegoDescription
+): Promise<ValidationReport> {
+  const res = await fetch(`${API_BASE}/api/validate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(description),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Validation failed" }));
     throw new Error(err.detail ?? `HTTP ${res.status}`);
   }
 

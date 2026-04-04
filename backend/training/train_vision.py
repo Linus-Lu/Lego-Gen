@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fine-tune Qwen2.5-VL with QLoRA on LEGO image-to-JSON dataset.
+"""Fine-tune Qwen3-VL with QLoRA on LEGO image-to-JSON dataset.
 
 Usage:
     python -m backend.training.train_vision
@@ -15,7 +15,6 @@ import torch
 from transformers import (
     TrainingArguments,
     Trainer,
-    TrainerCallback,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -51,7 +50,7 @@ from backend.training.utils import (
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train Qwen2.5-VL LoRA for LEGO")
+    parser = argparse.ArgumentParser(description="Train Qwen3-VL LoRA for LEGO")
     parser.add_argument("--data-dir", type=str, default=str(DATA_DIR))
     parser.add_argument("--output-dir", type=str, default=str(CHECKPOINT_DIR / "qwen-lego-lora"))
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint path")
@@ -61,19 +60,6 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-wandb", action="store_true")
     return parser.parse_args()
-
-
-class JsonValidityCallback(TrainerCallback):
-    """Logs JSON validity rate during evaluation."""
-
-    def __init__(self, processor, num_samples: int = 20):
-        self.processor = processor
-        self.num_samples = num_samples
-
-    def on_evaluate(self, args, state, control, model=None, **kwargs):
-        if model is None:
-            return
-        print(f"  Step {state.global_step}: evaluation complete")
 
 
 def build_compute_metrics(processor):
@@ -126,7 +112,7 @@ def main():
         setup_wandb("legogen-qwen25vl", config=vars(args))
 
     # ── Model ──────────────────────────────────────────────────────────
-    print("Loading Qwen2.5-VL with QLoRA...")
+    print("Loading Qwen3-VL with QLoRA...")
     encoder = LegoVisionEncoder(
         model_name=MODEL_NAME,
         load_adapter=args.resume if args.resume else None,
@@ -157,6 +143,12 @@ def main():
     print(f"  Train: {len(train_ds)} samples, Val: {len(val_ds)} samples")
 
     # ── Training arguments ─────────────────────────────────────────────
+    # Compute total steps to scale save/eval intervals for small datasets
+    effective_batch = args.batch_size * GRADIENT_ACCUMULATION_STEPS
+    total_steps = (len(train_ds) // effective_batch) * args.epochs
+    # Save/eval every ~33% of training, minimum every 10 steps
+    adaptive_save_steps = max(10, min(SAVE_STEPS, total_steps // 3))
+
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.batch_size,
@@ -165,16 +157,16 @@ def main():
         num_train_epochs=args.epochs,
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
-        warmup_steps=WARMUP_STEPS,
+        warmup_steps=min(WARMUP_STEPS, total_steps // 5),
         weight_decay=WEIGHT_DECAY,
         bf16=USE_BF16,
         fp16=not USE_BF16 and torch.cuda.is_available(),
         optim="paged_adamw_8bit",
         logging_steps=LOGGING_STEPS,
         eval_strategy="steps",
-        eval_steps=EVAL_STEPS,
+        eval_steps=adaptive_save_steps,
         save_strategy="steps",
-        save_steps=SAVE_STEPS,
+        save_steps=adaptive_save_steps,
         save_total_limit=SAVE_TOTAL_LIMIT,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
@@ -182,16 +174,18 @@ def main():
         report_to="wandb" if not args.no_wandb else "none",
         dataloader_num_workers=4,
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         remove_unused_columns=False,
     )
 
     # ── Trainer ────────────────────────────────────────────────────────
+    # Note: compute_metrics disabled to avoid OOM from prediction concatenation.
+    # eval_loss is tracked automatically by the Trainer.
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=val_ds,
-        callbacks=[JsonValidityCallback(processor)],
     )
 
     # ── Train ──────────────────────────────────────────────────────────
