@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Header from '../components/Header';
 import UploadPanel from '../components/UploadPanel';
 import StepList from '../components/StepList';
@@ -6,7 +7,7 @@ import StepDetail from '../components/StepDetail';
 import ColorLegend from '../components/ColorLegend';
 import LegoViewer from '../components/LegoViewer';
 import ValidationPanel from '../components/ValidationPanel';
-import { generateBuild, generateBuildFromText } from '../api/legogen';
+import { generateBuild, generateBuildFromText, createGalleryBuild } from '../api/legogen';
 import type { GenerateResponse } from '../api/legogen';
 
 interface Message {
@@ -16,7 +17,10 @@ interface Message {
 }
 
 const BuildSession: React.FC = () => {
+  const navigate = useNavigate();
   const [input, setInput] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -78,6 +82,7 @@ const BuildSession: React.FC = () => {
         result = await generateBuildFromText(textToSend);
       }
       setBuildResult(result);
+      setSaved(false);
       setCurrentStep(1);
 
       const desc = result.description;
@@ -277,6 +282,50 @@ const BuildSession: React.FC = () => {
                       </div>
                     )}
                   </div>
+                </div>
+
+                {/* Action buttons */}
+                <div className="flex gap-2 mt-3">
+                  <button
+                    onClick={async () => {
+                      if (!buildResult || saving) return;
+                      setSaving(true);
+                      try {
+                        // Capture thumbnail from canvas
+                        const canvas = document.querySelector('canvas');
+                        const thumbnail = canvas ? canvas.toDataURL('image/png').split(',')[1] : '';
+                        await createGalleryBuild({
+                          title: buildResult.description?.object ?? 'Untitled Build',
+                          description_json: JSON.stringify({
+                            ...buildResult.description,
+                            steps: buildResult.steps,
+                          }),
+                          thumbnail_b64: thumbnail,
+                        });
+                        setSaved(true);
+                      } catch {
+                        // silent
+                      } finally {
+                        setSaving(false);
+                      }
+                    }}
+                    disabled={saving || saved}
+                    className={`px-4 py-2 rounded-xl text-xs font-medium transition ${
+                      saved
+                        ? 'bg-green-500/15 text-green-300 border border-green-500/20'
+                        : 'bg-white/5 hover:bg-white/10 text-gray-300'
+                    }`}
+                  >
+                    {saved ? 'Saved!' : saving ? 'Saving...' : 'Save to Gallery'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      navigate('/guide/new', { state: { build: buildResult } });
+                    }}
+                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-medium text-white transition"
+                  >
+                    Start Building
+                  </button>
                 </div>
               </div>
             </div>

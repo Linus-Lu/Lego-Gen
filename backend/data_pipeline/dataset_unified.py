@@ -2,13 +2,19 @@
 
 Interleaves image-JSON pairs with text-JSON pairs so a single LoRA adapter
 learns both tasks on one Qwen3.5-9B model.
+
+Curriculum ordering: untruncated (complete) samples are placed first so that
+early-stopped runs train on the highest-quality data.
 """
 
 import json
+import os
+import random
 from pathlib import Path
+from threading import Lock
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from PIL import Image
 
 import sys
@@ -28,6 +34,35 @@ from backend.models.tokenizer import (
     sample_prompt_template,
 )
 from backend.data_pipeline.dataset import TRAIN_TRANSFORMS, VAL_TRANSFORMS
+
+
+class CurriculumSampler(Sampler[int]):
+    """Samples untruncated indices (shuffled) first, then truncated indices (shuffled).
+
+    Each epoch re-shuffles within each partition but always visits all
+    untruncated samples before any truncated ones.  This ensures that
+    early-stopped runs train on the highest-quality (complete) data.
+    """
+
+    def __init__(self, dataset: "UnifiedLegoDataset", seed: int = 42):
+        self.n_untruncated = dataset.n_untruncated
+        self.n_total = len(dataset)
+        self.seed = seed
+        self.epoch = 0
+
+    def __len__(self) -> int:
+        return self.n_total
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
+
+    def __iter__(self):
+        g = torch.Generator()
+        g.manual_seed(self.seed + self.epoch)
+        # Shuffle within each partition independently
+        untrunc = torch.randperm(self.n_untruncated, generator=g).tolist()
+        trunc = (torch.randperm(self.n_total - self.n_untruncated, generator=g) + self.n_untruncated).tolist()
+        return iter(untrunc + trunc)
 
 
 class UnifiedLegoDataset(Dataset):
@@ -100,6 +135,56 @@ class UnifiedLegoDataset(Dataset):
                     "source": "st2b",
                 }))
 
+        # ── Curriculum ordering: untruncated first ────────────────────
+        # Estimate token count from label file size (~3 chars/token)
+        # plus ~60 tokens of prompt/template overhead.
+        PROMPT_OVERHEAD = 60
+        CHARS_PER_TOKEN = 3.0
+
+        label_size_cache: dict[str, int] = {}
+        fits, truncated = [], []
+        for sample in self.samples:
+            lp = str(sample[1]["label_path"])
+            if lp not in label_size_cache:
+                try:
+                    label_size_cache[lp] = os.path.getsize(lp)
+                except OSError:
+                    label_size_cache[lp] = 0
+            est_tokens = int(label_size_cache[lp] / CHARS_PER_TOKEN) + PROMPT_OVERHEAD
+            if est_tokens <= self.max_length:
+                fits.append(sample)
+            else:
+                truncated.append(sample)
+
+        # Shuffle within each partition to keep task diversity,
+        # but keep all untruncated samples before truncated ones.
+        if split == "train":
+            random.Random(42).shuffle(fits)
+            random.Random(42).shuffle(truncated)
+
+        self.samples = fits + truncated
+        self.n_untruncated = len(fits)
+        self.n_truncated = len(truncated)
+
+        print(f"  [{split}] Curriculum: {len(fits)} untruncated, "
+              f"{len(truncated)} truncated ({len(truncated)*100/max(1,len(self.samples)):.1f}%) "
+              f"at max_length={self.max_length}")
+
+        # Runtime truncation counter (thread-safe for dataloader workers)
+        self._truncation_count = 0
+        self._truncation_lock = Lock()
+
+    @property
+    def truncation_stats(self) -> dict:
+        """Return truncation statistics collected during iteration."""
+        total = max(1, self.n_untruncated + self.n_truncated)
+        return {
+            "estimated_untruncated": self.n_untruncated,
+            "estimated_truncated": self.n_truncated,
+            "estimated_truncation_pct": round(self.n_truncated * 100 / total, 1),
+            "actual_truncated": self._truncation_count,
+        }
+
     @staticmethod
     def _find_image(images_dir: Path, set_num: str) -> Path | None:
         for ext in (".jpg", ".jpeg", ".png", ".webp"):
@@ -120,9 +205,23 @@ class UnifiedLegoDataset(Dataset):
         sample_type, paths = self.samples[idx]
 
         if sample_type == "vision":
-            return self._get_vision_sample(paths)
+            result = self._get_vision_sample(paths)
         else:
-            return self._get_text_sample(paths, idx)
+            result = self._get_text_sample(paths, idx)
+
+        # Track actual truncation: if the last non-pad token is at max_length-1,
+        # the sequence was likely truncated.
+        ids = result["input_ids"]
+        pad_id = self.processor.tokenizer.pad_token_id
+        if pad_id is not None:
+            non_pad = (ids != pad_id).sum().item()
+        else:
+            non_pad = len(ids)
+        if non_pad >= self.max_length:
+            with self._truncation_lock:
+                self._truncation_count += 1
+
+        return result
 
     def _get_vision_sample(self, paths: dict) -> dict:
         """Process an image-JSON sample."""

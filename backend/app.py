@@ -11,11 +11,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backend.api.routes_generate import router as generate_router
 from backend.api.routes_validate import router as validate_router
+from backend.api.routes_gallery import router as gallery_router
+from backend.storage import gallery_db
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle. Models load lazily on first request."""
+    await gallery_db.init_db()
     print("LEGOGen API ready. Models will load on first request.")
     yield
     print("Shutting down LEGOGen.")
@@ -39,6 +42,7 @@ app.add_middleware(
 
 app.include_router(generate_router)
 app.include_router(validate_router)
+app.include_router(gallery_router)
 
 
 @app.get("/health")

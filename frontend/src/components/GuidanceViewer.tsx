@@ -4,41 +4,37 @@ import { OrbitControls, Grid } from '@react-three/drei';
 import BrickMesh, { getBrickSize } from './BrickMesh';
 import type { BuildStep } from '../api/legogen';
 
-// ── Props ─────────────────────────────────────────────────────────────
-
-interface LegoViewerProps {
+interface GuidanceViewerProps {
   steps: BuildStep[];
   currentStep: number;
+  /** Index of the brick within the current step that is being narrated (0-based). -1 = none */
+  narratedBrickIdx?: number;
+  exploded?: boolean;
 }
-
-// ── Position mapping ──────────────────────────────────────────────────
 
 const STEP_Y_BASE = 0;
 const LAYER_HEIGHT = 2.0;
+const EXPLODED_SPREAD = 1.5;
 
-// ── Scene content ─────────────────────────────────────────────────────
-
-interface SceneProps {
-  steps: BuildStep[];
-  currentStep: number;
+interface BrickData {
+  key: string;
+  position: [number, number, number];
+  size: [number, number, number];
+  color: string;
+  isTrans: boolean;
+  stepNum: number;
+  localIdx: number; // index within step
 }
 
-function Scene({ steps, currentStep }: SceneProps) {
+function GuidanceScene({ steps, currentStep, narratedBrickIdx = -1, exploded = false }: GuidanceViewerProps) {
   const bricks = useMemo(() => {
-    const result: {
-      key: string;
-      position: [number, number, number];
-      size: [number, number, number];
-      color: string;
-      isTrans: boolean;
-      stepNum: number;
-    }[] = [];
-
+    const result: BrickData[] = [];
     let globalIdx = 0;
 
     for (const step of steps) {
       const stepIdx = step.step_number - 1;
-      const baseY = STEP_Y_BASE + stepIdx * LAYER_HEIGHT;
+      const extraSpread = exploded ? stepIdx * EXPLODED_SPREAD : 0;
+      const baseY = STEP_Y_BASE + stepIdx * LAYER_HEIGHT + extraSpread;
 
       let partIdx = 0;
       for (const part of step.parts) {
@@ -51,12 +47,13 @@ function Scene({ steps, currentStep }: SceneProps) {
           const y = baseY + size[1] / 2;
 
           result.push({
-            key: `brick-${globalIdx}`,
+            key: `gbrick-${globalIdx}`,
             position: [x, y, z],
             size,
             color: part.color_hex,
             isTrans: part.is_trans ?? part.color.toLowerCase().includes('trans'),
             stepNum: step.step_number,
+            localIdx: partIdx,
           });
           partIdx++;
           globalIdx++;
@@ -65,7 +62,7 @@ function Scene({ steps, currentStep }: SceneProps) {
     }
 
     return result;
-  }, [steps]);
+  }, [steps, exploded]);
 
   return (
     <>
@@ -86,9 +83,23 @@ function Scene({ steps, currentStep }: SceneProps) {
       />
 
       {bricks.map((b) => {
-        if (b.stepNum > currentStep) return null;
+        const isPast = b.stepNum < currentStep;
         const isCurrent = b.stepNum === currentStep;
-        const opacity = isCurrent ? 1.0 : 0.35;
+        const isFuture = b.stepNum > currentStep;
+        const isNarrated = isCurrent && b.localIdx === narratedBrickIdx;
+
+        let opacity = 1.0;
+        let wireframe = false;
+        let glow = false;
+
+        if (isPast) {
+          opacity = 0.5;
+        } else if (isFuture) {
+          opacity = 0.15;
+          wireframe = true;
+        } else if (isNarrated) {
+          glow = true;
+        }
 
         return (
           <BrickMesh
@@ -98,6 +109,8 @@ function Scene({ steps, currentStep }: SceneProps) {
             color={b.color}
             isTrans={b.isTrans}
             opacity={opacity}
+            wireframe={wireframe}
+            glow={glow}
           />
         );
       })}
@@ -113,23 +126,22 @@ function Scene({ steps, currentStep }: SceneProps) {
   );
 }
 
-// ── Main component ────────────────────────────────────────────────────
+export default function GuidanceViewer(props: GuidanceViewerProps) {
+  const { steps, currentStep } = props;
 
-const LegoViewer: React.FC<LegoViewerProps> = ({ steps, currentStep }) => {
   if (!steps.length) {
     return (
       <div className="w-full h-full bg-gray-800 rounded-lg flex items-center justify-center min-h-[300px] border-2 border-dashed border-gray-700">
         <div className="text-center text-gray-500">
-          <div className="text-5xl mb-2 opacity-50" aria-hidden="true">🧊</div>
-          <p className="font-medium">3D Interactive View</p>
-          <p className="text-xs mt-2">Upload an image to see the 3D build</p>
+          <p className="font-medium">Guidance Viewer</p>
+          <p className="text-xs mt-2">No build data loaded</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="w-full h-full rounded-lg overflow-hidden bg-[#1a1a2e]" aria-label={`3D build viewer showing step ${currentStep} of ${steps.length}`}>
+    <div className="w-full h-full rounded-lg overflow-hidden bg-[#1a1a2e]" aria-label={`Guidance viewer step ${currentStep} of ${steps.length}`}>
       <Canvas
         camera={{ position: [10, 8, 10], fov: 45 }}
         shadows
@@ -137,10 +149,8 @@ const LegoViewer: React.FC<LegoViewerProps> = ({ steps, currentStep }) => {
       >
         <color attach="background" args={['#1a1a2e']} />
         <fog attach="fog" args={['#1a1a2e', 20, 40]} />
-        <Scene steps={steps} currentStep={currentStep} />
+        <GuidanceScene {...props} />
       </Canvas>
     </div>
   );
-};
-
-export default LegoViewer;
+}

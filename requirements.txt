@@ -21,3 +21,4 @@ tqdm
 wandb
 scipy
 scikit-learn
+aiosqlite

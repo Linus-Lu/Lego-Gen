@@ -68,6 +68,21 @@ export interface GenerateResponse {
   validation?: ValidationReport;
 }
 
+// ── Gallery types ────────────────────────────────────────────────────
+
+export interface GalleryBuild {
+  id: string;
+  title: string;
+  category: string;
+  complexity: string;
+  parts_count: number;
+  description_json: string;
+  thumbnail_b64: string;
+  stars: number;
+  star_count: number;
+  created_at: string;
+}
+
 // ── API client ────────────────────────────────────────────────────────
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
@@ -126,5 +141,55 @@ export async function validateBuild(
     throw new Error(err.detail ?? `HTTP ${res.status}`);
   }
 
+  return res.json();
+}
+
+// ── Gallery API ──────────────────────────────────────────────────────
+
+export async function listGalleryBuilds(params?: {
+  category?: string;
+  sort?: string;
+  q?: string;
+}): Promise<GalleryBuild[]> {
+  const url = new URL(`${API_BASE}/api/gallery`);
+  if (params?.category) url.searchParams.set('category', params.category);
+  if (params?.sort) url.searchParams.set('sort', params.sort);
+  if (params?.q) url.searchParams.set('q', params.q);
+
+  const res = await fetch(url.toString());
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function createGalleryBuild(data: {
+  title: string;
+  description_json: string;
+  thumbnail_b64: string;
+}): Promise<GalleryBuild> {
+  const res = await fetch(`${API_BASE}/api/gallery`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err2 = await res.json().catch(() => ({ detail: 'Failed to save' }));
+    throw new Error(err2.detail ?? `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getGalleryBuild(id: string): Promise<GalleryBuild> {
+  const res = await fetch(`${API_BASE}/api/gallery/${id}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function starGalleryBuild(id: string, stars: number): Promise<GalleryBuild> {
+  const res = await fetch(`${API_BASE}/api/gallery/${id}/star`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ stars }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }

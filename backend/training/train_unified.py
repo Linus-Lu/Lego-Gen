@@ -43,6 +43,7 @@ from backend.models.tokenizer import decode_and_parse
 from backend.data_pipeline.dataset_unified import (
     UnifiedLegoDataset,
     UnifiedCollator,
+    CurriculumSampler,
     load_unified_splits,
 )
 from backend.training.utils import (
@@ -56,15 +57,18 @@ from backend.training.utils import (
 class EpochUpdateCallback(TrainerCallback):
     """Update dataset epoch counter for prompt rotation diversity."""
 
-    def __init__(self, train_dataset, val_dataset=None):
+    def __init__(self, train_dataset, val_dataset=None, sampler=None):
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
+        self.sampler = sampler
 
     def on_epoch_begin(self, args, state, control, **kwargs):
         epoch = int(state.epoch) if state.epoch else 0
         self.train_dataset.epoch = epoch
         if self.val_dataset is not None:
             self.val_dataset.epoch = epoch
+        if self.sampler is not None:
+            self.sampler.set_epoch(epoch)
         print(f"  Epoch {epoch}: updated dataset prompt rotation")
 
 
@@ -203,25 +207,43 @@ def main():
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         remove_unused_columns=False,
+        eval_accumulation_steps=8,
     )
 
+    # ── Curriculum sampler ──────────────────────────────────────────────
+    curriculum_sampler = CurriculumSampler(train_ds, seed=args.seed)
+
+    class CurriculumTrainer(Trainer):
+        """Override sampler so untruncated samples are seen first each epoch."""
+        def _get_train_sampler(self):
+            return curriculum_sampler
+
     # ── Trainer ────────────────────────────────────────────────────────
-    trainer = Trainer(
+    trainer = CurriculumTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=val_ds,
         data_collator=UnifiedCollator(),
         compute_metrics=build_compute_metrics(tokenizer),
-        callbacks=[EpochUpdateCallback(train_ds, val_ds)],
+        callbacks=[EpochUpdateCallback(train_ds, val_ds, sampler=curriculum_sampler)],
     )
 
     # ── Train ──────────────────────────────────────────────────────────
     print("Starting unified training...")
     trainer.train(resume_from_checkpoint=args.resume)
 
+    # ── Truncation report ─────────────────────────────────────────────
+    print("\nTruncation Report:")
+    for name, ds in [("Train", train_ds), ("Val", val_ds)]:
+        stats = ds.truncation_stats
+        print(f"  {name}: {stats['estimated_untruncated']} untruncated, "
+              f"{stats['estimated_truncated']} truncated "
+              f"({stats['estimated_truncation_pct']}%), "
+              f"actual truncated during iteration: {stats['actual_truncated']}")
+
     # ── Save final adapter ─────────────────────────────────────────────
-    print("Saving unified adapter...")
+    print("\nSaving unified adapter...")
     model_wrapper.save_adapter(args.output_dir)
 
     # ── Final evaluation ───────────────────────────────────────────────
