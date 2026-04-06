@@ -5,8 +5,8 @@ const About: React.FC = () => {
   const architectureCards = [
     {
       title: 'Unified AI Model',
-      subtitle: 'Qwen3.5-27B + LoRA',
-      desc: 'A single unified Qwen3.5-27B multimodal transformer handles both image-to-JSON and text-to-JSON generation through a shared LoRA adapter. Fine-tuned with 4-bit NF4 quantization, rank-64 LoRA on all linear layers, keeping the vision encoder frozen while adapting the language model for structured LEGO output.',
+      subtitle: 'Qwen3.5-9B + LoRA',
+      desc: 'A single unified Qwen3.5-9B multimodal transformer handles both image-to-JSON and text-to-JSON generation through a shared LoRA adapter. Fine-tuned with 4-bit NF4 quantization, rank-64 LoRA on all linear layers, keeping the vision encoder frozen while adapting the language model for structured LEGO output.',
       color: 'from-blue-500',
     },
     {
@@ -48,14 +48,14 @@ const About: React.FC = () => {
   ];
 
   const techStack = [
-    'PyTorch', 'Qwen3.5-27B', 'LoRA', 'BitsAndBytes', 'FastAPI',
+    'PyTorch', 'Qwen3.5-9B', 'LoRA', 'BitsAndBytes', 'FastAPI',
     'React 19', 'TypeScript', 'Three.js', 'React Three Fiber',
     'Tailwind CSS', 'Vite', 'SQLite', 'aiosqlite',
     'Rebrickable API', 'HuggingFace', 'Web Speech API',
   ];
 
   const highlights = [
-    { label: 'Unified Model', value: 'Qwen3.5-27B' },
+    { label: 'Unified Model', value: 'Qwen3.5-9B' },
     { label: 'Quantization', value: '4-bit NF4' },
     { label: 'LoRA Rank', value: '64 / Alpha 128' },
     { label: 'Cache Layers', value: '3 (KV + Response + Token)' },
@@ -79,7 +79,7 @@ const About: React.FC = () => {
             <p className="text-lg text-gray-400 max-w-2xl leading-relaxed">
               An AI-powered system that generates LEGO building instructions from
               images or text prompts, built as a Final Year Project exploring
-              unified multimodal transformers. Powered by a single Qwen3.5-27B
+              unified multimodal transformers. Powered by a single Qwen3.5-9B
               model with LoRA adaptation and a three-layer prompt caching system
               for fast inference.
             </p>
