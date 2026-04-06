@@ -3,23 +3,49 @@ import { useFrame } from '@react-three/fiber';
 import type { Mesh } from 'three';
 import type { Part } from '../api/legogen';
 
+// ── LEGO unit constants (in Three.js units) ─────────────────────────
+// 1 stud = 1.0 unit width/depth
+// 1 brick height = 1.2 units (real ratio: 9.6mm tall / 8mm stud pitch)
+// 1 plate height = 0.4 units (real ratio: 3.2mm / 8mm)
+
+const STUD = 1.0;
+const BRICK_H = 1.2;
+const PLATE_H = 0.4;
+
 // ── Size mapping ─────────────────────────────────────────────────────
 
+/** Parse "Brick 2x4" or "Plate 1x6" style names into [width, height, depth]. */
 export function getBrickSize(part: Part): [number, number, number] {
   const name = part.name.toLowerCase();
   const cat = part.category.toLowerCase();
 
-  if (cat.includes('baseplate') || name.includes('baseplate'))
-    return [4, 0.2, 4];
-  if (cat.includes('plate') || name.includes('plate'))
-    return [1.6, 0.35, 0.8];
-  if (cat.includes('slope') || cat.includes('roof') || name.includes('slope'))
-    return [1.6, 1.0, 0.8];
-  if (cat.includes('tile') || name.includes('tile'))
-    return [1.6, 0.25, 0.8];
-  if (name.includes('window') || name.includes('door'))
-    return [0.8, 1.6, 0.3];
-  return [1.6, 1.0, 0.8];
+  // Try to parse NxM dimensions from the name
+  const dimMatch = name.match(/(\d+)\s*x\s*(\d+)/);
+  let w = 2, d = 2; // default 2x2
+  if (dimMatch) {
+    w = parseInt(dimMatch[1], 10);
+    d = parseInt(dimMatch[2], 10);
+    // LEGO convention: first number is shorter side, but "1x4" means 1-wide 4-long
+    // Keep as-is since that matches the name
+  }
+
+  // Determine height from category/name
+  let h = BRICK_H;
+  if (cat.includes('baseplate') || name.includes('baseplate')) {
+    return [Math.max(w, 8) * STUD, 0.2, Math.max(d, 8) * STUD];
+  }
+  if (cat.includes('plate') || name.includes('plate')) {
+    h = PLATE_H;
+  } else if (cat.includes('tile') || name.includes('tile')) {
+    h = PLATE_H * 0.8;
+  } else if (cat.includes('slope') || name.includes('slope')) {
+    h = BRICK_H;
+  } else if (name.includes('window') || name.includes('door')) {
+    // Windows/doors are typically taller
+    h = BRICK_H * 2;
+  }
+
+  return [w * STUD, h, d * STUD];
 }
 
 // ── Stud ─────────────────────────────────────────────────────────────
@@ -85,6 +111,22 @@ export default function BrickMesh({
     }
   });
 
+  // Add studs on top — one per stud position
+  const studs: [number, number, number][] = [];
+  const nStudsX = Math.max(1, Math.round(size[0] / STUD));
+  const nStudsZ = Math.max(1, Math.round(size[2] / STUD));
+  if (size[1] > 0.3) {
+    for (let sx = 0; sx < nStudsX; sx++) {
+      for (let sz = 0; sz < nStudsZ; sz++) {
+        studs.push([
+          position[0] + (sx - (nStudsX - 1) / 2) * STUD,
+          position[1] + size[1] / 2 + 0.075,
+          position[2] + (sz - (nStudsZ - 1) / 2) * STUD,
+        ]);
+      }
+    }
+  }
+
   return (
     <group>
       <mesh ref={meshRef} position={position} castShadow receiveShadow>
@@ -100,15 +142,16 @@ export default function BrickMesh({
           emissiveIntensity={glow ? 0.3 : 0}
         />
       </mesh>
-      {size[1] > 0.3 && (
+      {studs.map((sp, i) => (
         <Stud
-          position={[position[0], position[1] + size[1] / 2 + 0.075, position[2]]}
+          key={i}
+          position={sp}
           color={color}
           opacity={opacity}
           isTrans={isTrans}
           wireframe={wireframe}
         />
-      )}
+      ))}
     </group>
   );
 }

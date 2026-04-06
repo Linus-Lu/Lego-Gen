@@ -18,14 +18,19 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from backend.config import (
     UNIFIED_MODEL_NAME,
-    QUANTIZATION_BITS,
     UNIFIED_CHECKPOINT_DIR,
     USE_BF16,
 )
 
-# Unified LoRA config — matches planner (Qwen3.5 hybrid arch needs all-linear)
-UNIFIED_LORA_R = 64
-UNIFIED_LORA_ALPHA = 128
+# Import unified-specific quantization; fall back to legacy 4-bit
+try:
+    from backend.config import UNIFIED_QUANTIZATION_BITS
+except ImportError:
+    UNIFIED_QUANTIZATION_BITS = 4
+
+# Unified LoRA config — Qwen3.5 hybrid DeltaNet/Attention arch needs all-linear
+UNIFIED_LORA_R = 128        # higher rank for 27B model capacity
+UNIFIED_LORA_ALPHA = 256
 UNIFIED_LORA_DROPOUT = 0.05
 UNIFIED_LORA_TARGET_MODULES = "all-linear"
 
@@ -46,26 +51,36 @@ class LegoUnifiedModel:
         self.model_name = model_name
 
         # ── Quantization config ────────────────────────────────────────
-        self.bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16 if USE_BF16 else torch.float16,
-            bnb_4bit_use_double_quant=True,
-        )
+        if UNIFIED_QUANTIZATION_BITS == 4:
+            self.bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16 if USE_BF16 else torch.float16,
+                bnb_4bit_use_double_quant=True,
+            )
+        elif UNIFIED_QUANTIZATION_BITS == 8:
+            self.bnb_config = BitsAndBytesConfig(
+                load_in_8bit=True,
+            )
+        else:
+            self.bnb_config = None  # full precision
 
         # ── Load processor (handles both image and text) ──────────────
         self.processor = AutoProcessor.from_pretrained(
             model_name,
             min_pixels=256 * 28 * 28,
-            max_pixels=384 * 28 * 28,  # reduced from 512 to fit 32GB VRAM
+            max_pixels=512 * 28 * 28,  # Pro 6000 95GB handles full resolution
         )
 
         # ── Load base model (multimodal: vision + LM) ─────────────────
-        self.model = Qwen3_5ForConditionalGeneration.from_pretrained(
-            model_name,
-            quantization_config=self.bnb_config,
+        load_kwargs = dict(
             device_map="auto",
             torch_dtype=torch.bfloat16 if USE_BF16 else torch.float16,
+        )
+        if self.bnb_config is not None:
+            load_kwargs["quantization_config"] = self.bnb_config
+        self.model = Qwen3_5ForConditionalGeneration.from_pretrained(
+            model_name, **load_kwargs,
         )
 
         # ── Enable input gradients for gradient checkpointing compat ──
@@ -73,7 +88,7 @@ class LegoUnifiedModel:
 
         # ── Apply LoRA or load existing adapter ────────────────────────
         if load_adapter:
-            self.model = PeftModel.from_pretrained(self.model, load_adapter)
+            self.model = PeftModel.from_pretrained(self.model, load_adapter, is_trainable=True)
         else:
             self._apply_lora()
 

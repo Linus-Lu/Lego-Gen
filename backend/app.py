@@ -17,11 +17,24 @@ from backend.storage import gallery_db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup/shutdown lifecycle. Models load lazily on first request."""
+    """Startup/shutdown lifecycle. Preload model so first request isn't slow."""
+    import asyncio, os
     await gallery_db.init_db()
-    print("LEGOGen API ready. Models will load on first request.")
+    if os.environ.get("LEGOGEN_DEV", "1") != "1":
+        print("LEGOGen API starting — preloading model...")
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _preload_model)
+        print("LEGOGen API ready. Model loaded.")
+    else:
+        print("LEGOGen API ready (dev mode — mock pipeline).")
     yield
     print("Shutting down LEGOGen.")
+
+
+def _preload_model():
+    """Load the unified pipeline in a thread so startup isn't blocked."""
+    from backend.inference.pipeline import get_pipeline
+    get_pipeline()
 
 
 app = FastAPI(

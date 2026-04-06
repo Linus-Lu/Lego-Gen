@@ -11,57 +11,133 @@ interface LegoViewerProps {
   currentStep: number;
 }
 
-// ── Position mapping ──────────────────────────────────────────────────
+// ── Layout engine ────────────────────────────────────────────────────
 
-const STEP_Y_BASE = 0;
-const LAYER_HEIGHT = 2.0;
+const BRICK_H = 1.2;
+const GAP = 0.08; // small gap between bricks
+
+interface PlacedBrick {
+  key: string;
+  position: [number, number, number];
+  size: [number, number, number];
+  color: string;
+  isTrans: boolean;
+  stepNum: number;
+}
+
+/**
+ * Pack bricks into a roughly rectangular footprint for each layer.
+ * Fills rows left-to-right, wrapping when a row exceeds the target width.
+ */
+function packLayer(
+  parts: { size: [number, number, number]; color: string; isTrans: boolean; quantity: number }[],
+  baseY: number,
+  stepNum: number,
+  startIdx: number,
+): { bricks: PlacedBrick[]; layerHeight: number; nextIdx: number } {
+  const bricks: PlacedBrick[] = [];
+  let idx = startIdx;
+
+  // Expand parts by quantity
+  const expanded: { size: [number, number, number]; color: string; isTrans: boolean }[] = [];
+  for (const p of parts) {
+    for (let q = 0; q < p.quantity; q++) {
+      expanded.push({ size: p.size, color: p.color, isTrans: p.isTrans });
+    }
+  }
+
+  if (expanded.length === 0) return { bricks: [], layerHeight: BRICK_H, nextIdx: idx };
+
+  // Calculate target footprint width from total area
+  const totalArea = expanded.reduce((a, b) => a + b.size[0] * b.size[2], 0);
+  const targetWidth = Math.max(4, Math.ceil(Math.sqrt(totalArea) * 1.2));
+
+  // Sort bricks: wider bricks first for better packing
+  const sorted = [...expanded].sort((a, b) => (b.size[0] * b.size[2]) - (a.size[0] * a.size[2]));
+
+  // Simple row-based packing
+  let curX = 0;
+  let curZ = 0;
+  let rowMaxDepth = 0;
+  let maxHeight = 0;
+
+  // Track all placed positions to compute center offset
+  const positions: [number, number, number][] = [];
+
+  for (const brick of sorted) {
+    const [w, h, d] = brick.size;
+
+    // Wrap to next row if exceeding target width
+    if (curX + w > targetWidth && curX > 0) {
+      curZ += rowMaxDepth + GAP;
+      curX = 0;
+      rowMaxDepth = 0;
+    }
+
+    positions.push([curX + w / 2, baseY + h / 2, curZ + d / 2]);
+    bricks.push({
+      key: `brick-${idx}`,
+      position: [0, 0, 0], // will be centered below
+      size: [w, h, d],
+      color: brick.color,
+      isTrans: brick.isTrans,
+      stepNum,
+    });
+
+    curX += w + GAP;
+    rowMaxDepth = Math.max(rowMaxDepth, d);
+    maxHeight = Math.max(maxHeight, h);
+    idx++;
+  }
+
+  // Center the footprint around origin
+  if (positions.length > 0) {
+    const minX = Math.min(...positions.map(p => p[0] - bricks[positions.indexOf(p)]?.size[0] / 2 || 0));
+    const maxX = Math.max(...positions.map((p, i) => p[0] + bricks[i].size[0] / 2));
+    const minZ = Math.min(...positions.map(p => p[2] - bricks[positions.indexOf(p)]?.size[2] / 2 || 0));
+    const maxZ = Math.max(...positions.map((p, i) => p[2] + bricks[i].size[2] / 2));
+    const cx = (minX + maxX) / 2;
+    const cz = (minZ + maxZ) / 2;
+
+    for (let i = 0; i < bricks.length; i++) {
+      bricks[i].position = [
+        positions[i][0] - cx,
+        positions[i][1],
+        positions[i][2] - cz,
+      ];
+    }
+  }
+
+  return { bricks, layerHeight: maxHeight, nextIdx: idx };
+}
 
 // ── Scene content ─────────────────────────────────────────────────────
 
-interface SceneProps {
-  steps: BuildStep[];
-  currentStep: number;
-}
-
-function Scene({ steps, currentStep }: SceneProps) {
+function Scene({ steps, currentStep }: LegoViewerProps) {
   const bricks = useMemo(() => {
-    const result: {
-      key: string;
-      position: [number, number, number];
-      size: [number, number, number];
-      color: string;
-      isTrans: boolean;
-      stepNum: number;
-    }[] = [];
-
+    const result: PlacedBrick[] = [];
     let globalIdx = 0;
+    let currentY = 0;
 
     for (const step of steps) {
-      const stepIdx = step.step_number - 1;
-      const baseY = STEP_Y_BASE + stepIdx * LAYER_HEIGHT;
+      // Expand parts with their sizes
+      const partsWithSize = step.parts.map(part => ({
+        size: getBrickSize(part),
+        color: part.color_hex,
+        isTrans: part.is_trans ?? part.color.toLowerCase().includes('trans'),
+        quantity: part.quantity,
+      }));
 
-      let partIdx = 0;
-      for (const part of step.parts) {
-        const size = getBrickSize(part);
-        for (let q = 0; q < part.quantity; q++) {
-          const col = partIdx % 6;
-          const row = Math.floor(partIdx / 6);
-          const x = (col - 2.5) * (size[0] + 0.15);
-          const z = (row - 1) * (size[2] + 0.15);
-          const y = baseY + size[1] / 2;
+      const { bricks: layerBricks, layerHeight, nextIdx } = packLayer(
+        partsWithSize,
+        currentY,
+        step.step_number,
+        globalIdx,
+      );
 
-          result.push({
-            key: `brick-${globalIdx}`,
-            position: [x, y, z],
-            size,
-            color: part.color_hex,
-            isTrans: part.is_trans ?? part.color.toLowerCase().includes('trans'),
-            stepNum: step.step_number,
-          });
-          partIdx++;
-          globalIdx++;
-        }
-      }
+      result.push(...layerBricks);
+      currentY += layerHeight + GAP;
+      globalIdx = nextIdx;
     }
 
     return result;

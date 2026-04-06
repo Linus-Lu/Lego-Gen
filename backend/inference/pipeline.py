@@ -457,20 +457,26 @@ class UnifiedPipeline:
 
         # Layer 3: Tokenization cache for static prompt templates
         if CACHE_TOKENIZATION_ENABLED:
-            self.tokenization_cache.get_or_compute(
-                "vision_template",
-                lambda: self.processor.apply_chat_template(
-                    build_chat_messages(), tokenize=False,
-                    add_generation_prompt=True, enable_thinking=False,
-                ),
-            )
-            self.tokenization_cache.get_or_compute(
-                "planner_template_prefix",
-                lambda: self.processor.apply_chat_template(
-                    [{"role": "system", "content": PLANNER_SYSTEM_PROMPT}],
-                    tokenize=False, add_generation_prompt=False,
-                ),
-            )
+            try:
+                self.tokenization_cache.get_or_compute(
+                    "vision_template",
+                    lambda: self.processor.apply_chat_template(
+                        build_chat_messages(), tokenize=False,
+                        add_generation_prompt=True, enable_thinking=False,
+                    ),
+                )
+                self.tokenization_cache.get_or_compute(
+                    "planner_template_prefix",
+                    lambda: self.processor.apply_chat_template(
+                        [
+                            {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
+                            {"role": "user", "content": "placeholder"},
+                        ],
+                        tokenize=False, add_generation_prompt=False,
+                    ),
+                )
+            except Exception as e:
+                print(f"[cache] Tokenization warmup failed (non-fatal): {e}")
 
         elapsed = int((time.time() - start) * 1000)
         print(f"[cache] Warmup complete in {elapsed}ms")

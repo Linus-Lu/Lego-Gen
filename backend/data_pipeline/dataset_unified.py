@@ -274,7 +274,7 @@ class UnifiedLegoDataset(Dataset):
         """Process a text-JSON sample."""
         with open(paths["label_path"], "r") as f:
             label = json.load(f)
-        label_text = json.dumps(label, indent=2)
+        label_text = json.dumps(label)  # compact JSON — fewer boilerplate tokens
 
         # Pick a prompt with rotation
         prompt = self._pick_prompt(label, paths.get("prompts_path"), idx)

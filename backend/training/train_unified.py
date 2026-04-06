@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Unified training: fine-tune one Qwen3.5-9B LoRA on both image→JSON and text→JSON.
+"""Unified training: fine-tune one Qwen3.5-27B LoRA on both image→JSON and text→JSON.
 
 Usage:
     python -m backend.training.train_unified
-    python -m backend.training.train_unified --resume checkpoints/qwen35-lego-unified-lora/checkpoint-400
+    python -m backend.training.train_unified --resume checkpoints/qwen35-27b-lego-unified-lora/checkpoint-400
     python -m backend.training.train_unified --no-wandb --epochs 3
 """
 
@@ -54,6 +54,73 @@ from backend.training.utils import (
 )
 
 
+class StructureAwareWeights:
+    """Build per-token loss weights that upweight structural decisions.
+
+    JSON labels are ~62% boilerplate (syntax + whitespace) and only ~1.4%
+    structural layout tokens (layer names, positions, connects_to).
+    Standard cross-entropy drowns the structural signal.
+
+    This class pre-computes token ID sets for:
+      - boilerplate (JSON syntax, whitespace) → weight 0.1
+      - structural keywords (layer names, positions, connectivity) → weight 5.0
+      - everything else (part IDs, colors, quantities) → weight 1.0
+    """
+
+    def __init__(self, tokenizer, boilerplate_weight=0.1, structure_weight=5.0):
+        self.boilerplate_weight = boilerplate_weight
+        self.structure_weight = structure_weight
+
+        # Collect token IDs for JSON syntax characters
+        self.boilerplate_ids: set[int] = set()
+        for char in ["{", "}", "[", "]", ":", ",", '{"', '"}', '["', '"]',
+                     '":', '",', "},", "],", "  ", "    ", "\n", "\n  ",
+                     "\n    ", "\n      ", "\n        "]:
+            ids = tokenizer.encode(char, add_special_tokens=False)
+            self.boilerplate_ids.update(ids)
+
+        # Also add common JSON field keys that repeat in every sample
+        for key in ['"part_id"', '"name"', '"category"', '"color"',
+                    '"color_hex"', '"is_trans"', '"quantity"', '"type"',
+                    '"spatial"', '"subassemblies"', '"parts"',
+                    '"dimensions_estimate"', '"dominant_colors"',
+                    '"build_hints"', '"set_id"', '"object"',
+                    '"subcategory"', '"complexity"', '"total_parts"',
+                    '"width"', '"height"', '"depth"',
+                    ': "', ': {', ': [', ': true', ': false']:
+            ids = tokenizer.encode(key, add_special_tokens=False)
+            self.boilerplate_ids.update(ids)
+
+        # Structural keywords — the decisions that matter most
+        self.structure_ids: set[int] = set()
+        for word in ["layer_0", "layer_1", "layer_2", "layer_3", "layer_4",
+                     "layer_5", "layer_6", "layer_7", "layer_8", "layer_9",
+                     "bottom", "center", "top", "left", "right",
+                     "connects_to", "position", "orientation",
+                     "flat", "upright", "angled", "inverted"]:
+            ids = tokenizer.encode(word, add_special_tokens=False)
+            self.structure_ids.update(ids)
+
+        # Remove any overlap (structure wins over boilerplate)
+        self.boilerplate_ids -= self.structure_ids
+
+        print(f"[StructureAwareWeights] boilerplate token IDs: {len(self.boilerplate_ids)}, "
+              f"structure token IDs: {len(self.structure_ids)}")
+
+    def get_weights(self, labels: torch.Tensor) -> torch.Tensor:
+        """Return per-token weights. Shape matches labels."""
+        weights = torch.ones_like(labels, dtype=torch.float32)
+
+        for tid in self.boilerplate_ids:
+            weights[labels == tid] = self.boilerplate_weight
+        for tid in self.structure_ids:
+            weights[labels == tid] = self.structure_weight
+
+        # Masked tokens (-100) get weight 0
+        weights[labels == -100] = 0.0
+        return weights
+
+
 class EpochUpdateCallback(TrainerCallback):
     """Update dataset epoch counter for prompt rotation diversity."""
 
@@ -70,6 +137,26 @@ class EpochUpdateCallback(TrainerCallback):
         if self.sampler is not None:
             self.sampler.set_epoch(epoch)
         print(f"  Epoch {epoch}: updated dataset prompt rotation")
+
+
+class ProgressCallback(TrainerCallback):
+    """Log a milestone every 10% of training."""
+
+    def __init__(self):
+        self.next_pct = 10
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.max_steps <= 0:
+            return
+        pct = 100 * state.global_step / state.max_steps
+        if pct >= self.next_pct:
+            loss = state.log_history[-1].get("loss", "?") if state.log_history else "?"
+            elapsed_h = (state.log_history[-1].get("epoch", 0) / state.num_train_epochs * 100) if state.log_history else pct
+            print(f"\n{'='*60}")
+            print(f"  MILESTONE: {int(self.next_pct)}% complete — "
+                  f"step {state.global_step}/{state.max_steps}, loss={loss}")
+            print(f"{'='*60}\n", flush=True)
+            self.next_pct += 10
 
 
 def parse_args():
@@ -132,7 +219,7 @@ def main():
         setup_wandb("legogen-unified", config=vars(args))
 
     # ── Model ──────────────────────────────────────────────────────────
-    print("Loading unified Qwen3.5 model with QLoRA...")
+    print(f"Loading unified {UNIFIED_MODEL_NAME} model with LoRA...")
     model_wrapper = LegoUnifiedModel(
         model_name=UNIFIED_MODEL_NAME,
         load_adapter=args.resume if args.resume else None,
@@ -175,6 +262,18 @@ def main():
     print(f"  Train: {len(train_ds)} samples ({n_vision} vision, {n_text} text)")
     print(f"  Val:   {len(val_ds)} samples")
 
+    # Cap val set with balanced modality coverage
+    MAX_VAL_SAMPLES = 500
+    if len(val_ds) > MAX_VAL_SAMPLES:
+        vision_samples = [s for s in val_ds.samples if s[0] == "vision"]
+        text_samples = [s for s in val_ds.samples if s[0] == "text"]
+        # Keep all vision (minority class), fill rest with text
+        n_vision = min(len(vision_samples), MAX_VAL_SAMPLES // 3)
+        n_text = MAX_VAL_SAMPLES - n_vision
+        balanced = vision_samples[:n_vision] + text_samples[:n_text]
+        val_ds.samples = balanced
+        print(f"  Capped val set to {len(balanced)} ({n_vision} vision, {n_text} text)")
+
     # ── Training arguments ─────────────────────────────────────────────
     effective_batch = args.batch_size * UNIFIED_GRADIENT_ACCUMULATION
     total_steps = (len(train_ds) // effective_batch) * args.epochs
@@ -183,7 +282,7 @@ def main():
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=args.batch_size,
+        per_device_eval_batch_size=1,  # BS=1 for eval to avoid OOM from logit accumulation
         gradient_accumulation_steps=UNIFIED_GRADIENT_ACCUMULATION,
         num_train_epochs=args.epochs,
         learning_rate=args.lr,
@@ -203,30 +302,59 @@ def main():
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         report_to="wandb" if not args.no_wandb else "none",
-        dataloader_num_workers=2,
+        dataloader_num_workers=4,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         remove_unused_columns=False,
-        eval_accumulation_steps=8,
+        eval_accumulation_steps=4,  # accumulate fewer steps to reduce peak memory
     )
+
+    # ── Structure-aware loss weighting ───────────────────────────────────
+    structure_weights = StructureAwareWeights(tokenizer)
 
     # ── Curriculum sampler ──────────────────────────────────────────────
     curriculum_sampler = CurriculumSampler(train_ds, seed=args.seed)
 
     class CurriculumTrainer(Trainer):
-        """Override sampler so untruncated samples are seen first each epoch."""
-        def _get_train_sampler(self):
+        """Custom trainer with curriculum sampling and structure-aware loss."""
+
+        def _get_train_sampler(self, *args, **kwargs):
             return curriculum_sampler
 
+        def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+            labels = inputs.pop("labels")
+            outputs = model(**inputs)
+            logits = outputs.logits
+
+            # Shift for causal LM: predict next token
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+
+            # Per-token cross-entropy (no reduction)
+            loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+            flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+            flat_labels = shift_labels.view(-1)
+            per_token_loss = loss_fct(flat_logits, flat_labels)
+
+            # Apply structure-aware weights
+            weights = structure_weights.get_weights(shift_labels).view(-1)
+            weighted_loss = (per_token_loss * weights).sum() / weights.sum().clamp(min=1.0)
+
+            return (weighted_loss, outputs) if return_outputs else weighted_loss
+
     # ── Trainer ────────────────────────────────────────────────────────
+    # compute_metrics disabled for 27B model — accumulating full logits across
+    # the 46k val set causes OOM.  eval_loss is tracked automatically.
     trainer = CurriculumTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=val_ds,
         data_collator=UnifiedCollator(),
-        compute_metrics=build_compute_metrics(tokenizer),
-        callbacks=[EpochUpdateCallback(train_ds, val_ds, sampler=curriculum_sampler)],
+        callbacks=[
+            EpochUpdateCallback(train_ds, val_ds, sampler=curriculum_sampler),
+            ProgressCallback(),
+        ],
     )
 
     # ── Train ──────────────────────────────────────────────────────────

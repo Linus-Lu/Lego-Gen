@@ -29,7 +29,7 @@ MODEL_NAME = "Qwen/Qwen3-VL-8B-Instruct"
 MAX_SEQ_LENGTH = 4096
 
 # ── Unified Model ─────────────────────────────────────────────────────
-UNIFIED_MODEL_NAME = "Qwen/Qwen3.5-9B"
+UNIFIED_MODEL_NAME = "Qwen/Qwen3.5-27B"
 
 # ── QLoRA (vision-only — keeps original targets for existing adapter) ─
 LORA_R = 32
@@ -49,7 +49,7 @@ MAX_GRAD_NORM = 1.0
 LOGGING_STEPS = 10
 EVAL_STEPS = 200
 SAVE_STEPS = 200
-SAVE_TOTAL_LIMIT = 3
+SAVE_TOTAL_LIMIT = 2  # keep only 2 checkpoints — 100GB volume is tight with 27B model
 
 # ── Planner (text-to-JSON) ─────────────────────────────────────────
 PLANNER_MODEL_NAME = "Qwen/Qwen3.5-9B"
@@ -76,14 +76,15 @@ ST2B_CONVERTED_DIR = DATA_DIR / "st2b_labels"
 ST2B_PROMPTS_DIR = DATA_DIR / "st2b_prompts"
 PLANNER_PROMPTS_DIR = DATA_DIR / "prompts"
 
-# ── Unified Model (vision + planner on single Qwen3.5-9B) ────────────
-UNIFIED_CHECKPOINT_DIR = CHECKPOINT_DIR / "qwen35-lego-unified-lora"
-UNIFIED_LEARNING_RATE = 5e-5
-UNIFIED_NUM_EPOCHS = 5
-UNIFIED_WARMUP_STEPS = 300
-UNIFIED_BATCH_SIZE = 1
-UNIFIED_GRADIENT_ACCUMULATION = 32
-UNIFIED_MAX_SEQ_LENGTH = 2048  # 4096 OOMs on 32GB VRAM with 9B model
+# ── Unified Model (vision + planner on single Qwen3.5-27B) ───────────
+UNIFIED_CHECKPOINT_DIR = CHECKPOINT_DIR / "qwen35-27b-lego-unified-lora" / "checkpoint-600"
+UNIFIED_LEARNING_RATE = 3e-5       # lower LR for larger model
+UNIFIED_NUM_EPOCHS = 3
+UNIFIED_WARMUP_STEPS = 250
+UNIFIED_BATCH_SIZE = 4             # Pro 6000 95GB — better GPU utilization
+UNIFIED_GRADIENT_ACCUMULATION = 8   # effective batch = 32
+UNIFIED_MAX_SEQ_LENGTH = 4096      # Pro 6000 95GB fits 4096 with 4-bit 27B
+UNIFIED_QUANTIZATION_BITS = 4      # 4-bit NF4 — 27B model needs this to fit training on 95GB
 VISION_UPSAMPLE = 10  # upsample vision samples to balance with planner data
 
 # ── Prompt Caching ────────────────────────────────────────────────────
