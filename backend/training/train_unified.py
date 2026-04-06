@@ -230,24 +230,24 @@ def main():
     model_wrapper.print_trainable_params()
 
     # ── Dataset ────────────────────────────────────────────────────────
-    print("Loading unified dataset (vision + planner)...")
+    print("Loading Stage 2 dataset (ST2B text-only)...")
     data_dir = Path(args.data_dir)
     splits = load_unified_splits(data_dir)
 
     train_ds = UnifiedLegoDataset(
-        vision_set_nums=splits["vision_train"],
-        rebrickable_ids=splits["rebrickable_train"],
+        vision_set_nums=[],          # Stage 2: text-only, no vision
+        rebrickable_ids=[],          # Stage 2: ST2B-only, no Rebrickable
         st2b_ids=splits["st2b_train"],
         data_dir=data_dir,
         processor=processor,
         max_length=args.max_seq_length,
         split="train",
-        rebrickable_upsample=args.rebrickable_upsample,
-        vision_upsample=args.vision_upsample,
+        rebrickable_upsample=1,
+        vision_upsample=1,
     )
     val_ds = UnifiedLegoDataset(
-        vision_set_nums=splits["vision_val"],
-        rebrickable_ids=splits["rebrickable_val"],
+        vision_set_nums=[],
+        rebrickable_ids=[],
         st2b_ids=splits["st2b_val"],
         data_dir=data_dir,
         processor=processor,

@@ -87,6 +87,43 @@ UNIFIED_MAX_SEQ_LENGTH = 4096      # Pro 6000 95GB fits 4096 with 4-bit 27B
 UNIFIED_QUANTIZATION_BITS = 4      # 4-bit NF4 — 27B model needs this to fit training on 95GB
 VISION_UPSAMPLE = 10  # upsample vision samples to balance with planner data
 
+# ── Stage 1: Image → Description (lightweight LoRA) ──────────────────
+STAGE1_CHECKPOINT_DIR = CHECKPOINT_DIR / "qwen35-27b-lego-stage1-lora"
+STAGE1_LORA_R = 32
+STAGE1_LORA_ALPHA = 64
+STAGE1_LEARNING_RATE = 5e-5
+STAGE1_NUM_EPOCHS = 3
+STAGE1_WARMUP_STEPS = 100
+STAGE1_BATCH_SIZE = 4
+STAGE1_GRADIENT_ACCUMULATION = 4  # effective batch = 16
+STAGE1_MAX_SEQ_LENGTH = 512       # descriptions are short
+
+STAGE1_SYSTEM_PROMPT = (
+    "You are a LEGO design assistant. Describe this object's shape, structure, "
+    "colors, and proportions in a way useful for building it with LEGO bricks. "
+    "Focus on geometry and spatial relationships, not materials or artistic style. "
+    "Be concise — one to three sentences."
+)
+
+# ── COCO → ST2B category mapping for Stage 1 data ────────────────────
+COCO_TO_ST2B_CATEGORY = {
+    "chair": "chair",
+    "couch": "sofa",
+    "bed": "bed",
+    "dining table": "table",
+    "car": "car",
+    "bus": "bus",
+    "train": "train",
+    "truck": "truck",
+    "boat": "vessel",
+    "motorcycle": "motorbike",
+    "airplane": "airplane",
+    "bench": "bench",
+    "vase": "vase",
+    "cup": "mug",
+    "laptop": "laptop",
+}
+
 # ── Prompt Caching ────────────────────────────────────────────────────
 CACHE_ENABLED = os.environ.get("LEGOGEN_CACHE_ENABLED", "1") == "1"
 CACHE_KV_PREFIX_ENABLED = True       # Layer 1: KV-cache prefix reuse
