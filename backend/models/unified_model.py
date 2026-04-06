@@ -129,6 +129,20 @@ class LegoUnifiedModel:
         self.model.save_pretrained(str(save_path))
         self.processor.save_pretrained(str(save_path))
 
+    def load_named_adapter(self, name: str, adapter_path: str | Path) -> bool:
+        """Load an additional named LoRA adapter for adapter swapping."""
+        adapter_path = Path(adapter_path)
+        if not adapter_path.exists() or not (adapter_path / "adapter_config.json").exists():
+            print(f"Adapter '{name}' not found at {adapter_path}, skipping")
+            return False
+        self.model.load_adapter(str(adapter_path), adapter_name=name)
+        print(f"Loaded adapter '{name}' from {adapter_path}")
+        return True
+
+    def set_adapter(self, name: str):
+        """Switch to a named adapter."""
+        self.model.set_adapter(name)
+
     def print_trainable_params(self):
         """Print the number of trainable vs total parameters."""
         trainable = 0

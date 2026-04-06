@@ -416,6 +416,16 @@ class UnifiedPipeline:
         self.processor = self.wrapper.get_processor()
         self.model.eval()
 
+        # Try to load Stage 1 adapter for two-stage pipeline
+        from backend.config import STAGE1_CHECKPOINT_DIR
+        stage1_path = Path(STAGE1_CHECKPOINT_DIR)
+        self.has_stage1 = False
+        if stage1_path.exists() and (stage1_path / "adapter_config.json").exists():
+            self.has_stage1 = self.wrapper.load_named_adapter("stage1", stage1_path)
+            if self.has_stage1:
+                self.wrapper.set_adapter("default")
+                print("Two-stage pipeline enabled (Stage 1 + Stage 2)")
+
         # Initialize caching layers
         self._init_caches()
 
@@ -721,9 +731,64 @@ class UnifiedPipeline:
 
         return result
 
+    def describe_image_stage1(self, image) -> str:
+        """Stage 1: Generate a structural description from an image."""
+        import torch
+        from backend.config import STAGE1_SYSTEM_PROMPT
+        from backend.models.tokenizer import strip_thinking_blocks
+
+        if self.has_stage1:
+            self.wrapper.set_adapter("stage1")
+
+        with torch.inference_mode():
+            messages = [
+                {"role": "system", "content": STAGE1_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": "Describe this object for LEGO building."},
+                    ],
+                },
+            ]
+
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+                enable_thinking=False,
+            )
+
+            inputs = self.processor(
+                text=[text], images=[image], return_tensors="pt",
+            ).to(self.model.device)
+
+            outputs = self.model.generate(
+                **inputs, max_new_tokens=256, temperature=0.7,
+                top_p=0.9, do_sample=True,
+            )
+            generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
+            raw = self.processor.tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+        raw = strip_thinking_blocks(raw)
+
+        # Switch back to Stage 2 adapter
+        if self.has_stage1:
+            self.wrapper.set_adapter("default")
+
+        return raw.strip()
+
     def generate_build(self, image, cache_key: str | None = None) -> dict:
-        """Full pipeline: image -> description -> build steps."""
-        result = self.describe_image(image, cache_key=cache_key)
+        """Full pipeline: image -> description -> build steps.
+
+        If Stage 1 adapter is loaded, uses two-stage pipeline:
+          Stage 1: image -> text description
+          Stage 2: text description -> LEGO JSON
+        Otherwise falls back to single-stage image -> JSON.
+        """
+        if self.has_stage1:
+            description_text = self.describe_image_stage1(image)
+            result = self.describe_from_text(description_text)
+        else:
+            result = self.describe_image(image, cache_key=cache_key)
 
         from backend.inference.postprocess_manual import json_to_steps
         from backend.inference.stability_checker import StabilityChecker
@@ -737,7 +802,7 @@ class UnifiedPipeline:
             "description": description,
             "steps": steps,
             "metadata": {
-                "model_version": "qwen35-lego-unified-v1",
+                "model_version": "qwen35-lego-two-stage-v1" if self.has_stage1 else "qwen35-lego-unified-v1",
                 "generation_time_ms": result["generation_time_ms"],
                 "json_valid": result["is_valid"],
                 "errors": result["errors"],
