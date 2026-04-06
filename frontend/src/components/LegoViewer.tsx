@@ -30,7 +30,7 @@ interface PlacedBrick {
  * Fills rows left-to-right, wrapping when a row exceeds the target width.
  */
 function packLayer(
-  parts: { size: [number, number, number]; color: string; isTrans: boolean; quantity: number }[],
+  parts: { size: [number, number, number]; color: string; isTrans: boolean; quantity: number; gridPos?: [number, number] }[],
   baseY: number,
   stepNum: number,
   startIdx: number,
@@ -38,7 +38,44 @@ function packLayer(
   const bricks: PlacedBrick[] = [];
   let idx = startIdx;
 
-  // Expand parts by quantity
+  // If parts have grid_pos, use it for placement
+  const hasGridPos = parts.some(p => p.gridPos != null);
+  if (hasGridPos) {
+    const positions: [number, number, number][] = [];
+    for (const p of parts) {
+      const [w, h, d] = p.size;
+      const gx = p.gridPos?.[0] ?? 0;
+      const gz = p.gridPos?.[1] ?? 0;
+      for (let q = 0; q < p.quantity; q++) {
+        const x = (gx + q * w);
+        const z = gz;
+        positions.push([x + w / 2, baseY + h / 2, z + d / 2]);
+        bricks.push({
+          key: `brick-${idx}`,
+          position: [0, 0, 0],
+          size: [w, h, d],
+          color: p.color,
+          isTrans: p.isTrans,
+          stepNum,
+        });
+        idx++;
+      }
+    }
+    // Center the footprint
+    if (positions.length > 0) {
+      const allX = positions.map(p => p[0]);
+      const allZ = positions.map(p => p[2]);
+      const cx = (Math.min(...allX) + Math.max(...allX)) / 2;
+      const cz = (Math.min(...allZ) + Math.max(...allZ)) / 2;
+      for (let i = 0; i < bricks.length; i++) {
+        bricks[i].position = [positions[i][0] - cx, positions[i][1], positions[i][2] - cz];
+      }
+    }
+    const maxH = parts.reduce((m, p) => Math.max(m, p.size[1]), BRICK_H);
+    return { bricks, layerHeight: maxH, nextIdx: idx };
+  }
+
+  // Fallback: expand parts by quantity and auto-pack
   const expanded: { size: [number, number, number]; color: string; isTrans: boolean }[] = [];
   for (const p of parts) {
     for (let q = 0; q < p.quantity; q++) {
@@ -126,6 +163,7 @@ function Scene({ steps, currentStep }: LegoViewerProps) {
         color: part.color_hex,
         isTrans: part.is_trans ?? part.color.toLowerCase().includes('trans'),
         quantity: part.quantity,
+        gridPos: part.grid_pos,
       }));
 
       const { bricks: layerBricks, layerHeight, nextIdx } = packLayer(

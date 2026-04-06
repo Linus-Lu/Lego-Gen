@@ -8,6 +8,7 @@ export interface Part {
   color_hex: string;
   is_trans?: boolean;
   quantity: number;
+  grid_pos?: [number, number];  // [x, z] stud coordinates within layer
 }
 
 export interface BuildStep {
