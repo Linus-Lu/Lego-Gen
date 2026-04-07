@@ -122,9 +122,21 @@ else
 fi
 
 train_lines=$(wc -l < data/brick_training/train.jsonl)
-test_lines=$(wc -l < data/brick_training/test.jsonl)
 train_size=$(du -sh data/brick_training/train.jsonl | cut -f1)
 log "  Train: $train_lines examples ($train_size)"
+
+# Create test split if missing (hold out 10%)
+if [ ! -f "data/brick_training/test.jsonl" ]; then
+    log "  No test split found — creating one (10% holdout)..."
+    test_count=$((train_lines / 10))
+    tail -n "$test_count" data/brick_training/train.jsonl > data/brick_training/test.jsonl
+    head -n $((train_lines - test_count)) data/brick_training/train.jsonl > data/brick_training/train_tmp.jsonl
+    mv data/brick_training/train_tmp.jsonl data/brick_training/train.jsonl
+    train_lines=$((train_lines - test_count))
+    log "  Split: $train_lines train, $test_count test"
+fi
+
+test_lines=$(wc -l < data/brick_training/test.jsonl)
 log "  Test:  $test_lines examples"
 
 # Preview one example

@@ -46,6 +46,17 @@ DEFAULT_PALETTE: list[str] = [
 # Dark colors for ground-level weight boost
 _DARK_COLORS: set[str] = {"05131D", "583927", "A0A5A9", "237841", "C91A09"}
 
+# ShapeNet category IDs → human names
+SHAPENET_CATEGORIES: dict[str, str] = {
+    "02801938": "basket",   "02818832": "bed",      "02828884": "bench",
+    "02843684": "birdhouse","02871439": "bookshelf", "02876657": "bottle",
+    "02880940": "bowl",     "02924116": "bus",       "02942699": "camera",
+    "02958343": "car",      "03001627": "chair",     "03467517": "guitar",
+    "03593526": "jar",      "03797390": "mug",       "03928116": "piano",
+    "04004475": "pot",      "04256520": "sofa",      "04379243": "table",
+    "04460130": "tower",    "04468005": "train",     "04530566": "vessel",
+}
+
 CATEGORY_PALETTES: dict[str, list[str]] = {
     "basket":    ["583927", "E4CD9E", "958A73", "C91A09", "FEC401"],
     "bed":       ["FFFFFF", "A0A5A9", "C91A09", "0055BF", "E4CD9E"],
@@ -92,7 +103,7 @@ def parse_st2b_bricks(raw: str) -> list[tuple[int, int, int, int, int]]:
             continue
         m = _ST2B_RE.fullmatch(stripped)
         if m is None:
-            raise ValueError(f"Invalid ST2B brick line: {line!r}")
+            continue  # skip unparseable lines
         h, w, x, y, z = (int(m.group(i)) for i in range(1, 6))
         result.append((h, w, x, y, z))
     return result
@@ -224,27 +235,56 @@ def main() -> None:
     out_dir = Path("data/brick_training")
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    print("Loading StableText2Brick from HuggingFace...", flush=True)
     ds = load_dataset("AvaLovelace/StableText2Brick")
+    print(f"  Loaded: {ds}", flush=True)
 
-    for split_name, split_key in [("train", "train"), ("test", "test")]:
+    for split_name in ["train", "test"]:
+        if split_name not in ds:
+            print(f"  Skipping {split_name} (not in dataset)", flush=True)
+            continue
+
         out_path = out_dir / f"{split_name}.jsonl"
-        split = ds[split_key]
+        split = ds[split_name]
+        total = len(split)
+        count = 0
+        errors = 0
+
+        print(f"\nProcessing {split_name}: {total} structures × 5 captions...", flush=True)
+
         with out_path.open("w", encoding="utf-8") as fh:
-            for row in split:
+            for row_idx, row in enumerate(split):
                 structure_id: str = row["structure_id"]
-                category: str = row["category_id"]
+                category_id: str = row["category_id"]
+                category: str = SHAPENET_CATEGORIES.get(category_id, "")
                 captions: list[str] = row["captions"]
                 raw_text: str = row["bricks"]
 
-                raw_bricks = parse_st2b_bricks(raw_text)
+                try:
+                    raw_bricks = parse_st2b_bricks(raw_text)
+                except Exception:
+                    errors += 1
+                    continue
+
+                if not raw_bricks:
+                    errors += 1
+                    continue
 
                 for cap_idx, caption in enumerate(captions):
+                    if not caption:
+                        continue
                     seed = _make_seed(structure_id, cap_idx)
                     bricks = colorize_structure(raw_bricks, caption, category, seed)
                     example = format_training_example(caption, bricks)
                     fh.write(json.dumps(example) + "\n")
+                    count += 1
 
-        print(f"Wrote {out_path}")
+                if (row_idx + 1) % 5000 == 0 or row_idx + 1 == total:
+                    print(f"  [{row_idx+1}/{total}] {count} examples, {errors} errors", flush=True)
+
+        print(f"  {split_name}: {count} examples written → {out_path}", flush=True)
+        if errors:
+            print(f"  {split_name}: {errors} structures skipped due to errors", flush=True)
 
 
 if __name__ == "__main__":
