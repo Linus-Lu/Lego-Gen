@@ -15,6 +15,10 @@
 
 set -euo pipefail
 
+# ── HuggingFace cache (set to large disk if needed) ────────────────────
+export HF_HOME="${HF_HOME:-/root/autodl-tmp/cache}"
+mkdir -p "$HF_HOME"
+
 # ── Timestamps ──────────────────────────────────────────────────────────
 start_time=$(date +%s)
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
