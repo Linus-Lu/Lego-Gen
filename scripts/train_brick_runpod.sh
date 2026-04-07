@@ -18,6 +18,9 @@ set -euo pipefail
 export HF_HOME="${HF_HOME:-/root/autodl-tmp/cache}"
 mkdir -p "$HF_HOME"
 
+# Reduce CUDA memory fragmentation
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # ── Timestamps ──────────────────────────────────────────────────────────
 start_time=$(date +%s)
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
@@ -185,15 +188,15 @@ log "    Model:       Qwen3.5-4B + LoRA (r=32, alpha=64)"
 log "    Targets:     q_proj, v_proj"
 log "    LR:          2e-3 (cosine schedule)"
 log "    Epochs:      3"
-log "    Max seq len: 4096"
+log "    Max seq len: 2048"
 log "    Precision:   bf16"
 log "    Eval:        every 500 steps"
 log "    Save:        every 500 steps (keep last 2)"
 
 NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())")
-EFFECTIVE_BATCH=$((2 * 8 * NUM_GPUS))
+EFFECTIVE_BATCH=$((1 * 16 * NUM_GPUS))
 log "    GPUs:        $NUM_GPUS"
-log "    Batch:       2/GPU × 8 accum × $NUM_GPUS GPUs = effective $EFFECTIVE_BATCH"
+log "    Batch:       1/GPU × 16 accum × $NUM_GPUS GPUs = effective $EFFECTIVE_BATCH"
 
 # Estimate steps
 TRAIN_LINES=$(wc -l < data/brick_training/train.jsonl)
