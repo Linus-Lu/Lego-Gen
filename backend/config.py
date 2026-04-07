@@ -81,8 +81,8 @@ UNIFIED_CHECKPOINT_DIR = CHECKPOINT_DIR / "qwen35-9b-lego-stage2-lora"
 UNIFIED_LEARNING_RATE = 5e-5       # higher LR ok for smaller model
 UNIFIED_NUM_EPOCHS = 3
 UNIFIED_WARMUP_STEPS = 200
-UNIFIED_BATCH_SIZE = 8             # 9B 4-bit fits bs=8 on 32GB (5090)
-UNIFIED_GRADIENT_ACCUMULATION = 4   # effective batch = 32
+UNIFIED_BATCH_SIZE = 1             # 9B 4-bit fits bs=1 on 32GB (5090) with chunked loss
+UNIFIED_GRADIENT_ACCUMULATION = 32  # effective batch = 32
 UNIFIED_MAX_SEQ_LENGTH = 4096
 UNIFIED_QUANTIZATION_BITS = 4      # 4-bit NF4
 VISION_UPSAMPLE = 10  # upsample vision samples to balance with planner data
@@ -97,6 +97,19 @@ STAGE1_WARMUP_STEPS = 100
 STAGE1_BATCH_SIZE = 4
 STAGE1_GRADIENT_ACCUMULATION = 4  # effective batch = 16
 STAGE1_MAX_SEQ_LENGTH = 512       # descriptions are short
+
+# ── Stage 2: Brick coordinate model ────────────────────────────────────
+BRICK_MODEL_NAME = "Qwen/Qwen3.5-4B"
+BRICK_CHECKPOINT_DIR = CHECKPOINT_DIR / "qwen35-4b-brick-lora"
+BRICK_LEARNING_RATE = 2e-3
+BRICK_BATCH_SIZE = 4
+BRICK_GRADIENT_ACCUMULATION = 4
+BRICK_MAX_SEQ_LENGTH = 8192
+BRICK_NUM_EPOCHS = 3
+BRICK_LORA_R = 32
+BRICK_LORA_ALPHA = 64
+BRICK_LORA_DROPOUT = 0.05
+BRICK_TRAINING_DATA = DATA_DIR / "brick_training"
 
 STAGE1_SYSTEM_PROMPT = (
     "You are a LEGO design assistant. Describe this object's shape, structure, "
