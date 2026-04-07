@@ -8,7 +8,8 @@ export interface Part {
   color_hex: string;
   is_trans?: boolean;
   quantity: number;
-  grid_pos?: [number, number];  // [x, z] stud coordinates within layer
+  grid_pos?: [number, number];        // [x, z] first instance (backward compat)
+  grid_positions?: [number, number][]; // per-instance [x, z] stud coordinates
 }
 
 export interface BuildStep {
@@ -69,6 +70,55 @@ export interface GenerateResponse {
   validation?: ValidationReport;
 }
 
+// ── Brick coordinate types ──────────────────────────────────────────
+
+export interface BrickCoord {
+  h: number; w: number;
+  x: number; y: number; z: number;
+  color: string;
+}
+
+export interface BrickResponse {
+  bricks: string;
+  caption: string;
+  brick_count: number;
+  stable: boolean;
+  metadata: {
+    model_version: string;
+    generation_time_ms: number;
+    rejections: number;
+    rollbacks: number;
+  };
+}
+
+export function parseBrickString(raw: string): BrickCoord[] {
+  if (!raw || !raw.trim()) return [];
+  const re = /(\d+)x(\d+) \((\d+),(\d+),(\d+)\) #([0-9A-Fa-f]{6})/;
+  return raw.trim().split('\n').flatMap(line => {
+    const m = line.trim().match(re);
+    if (!m) return [];
+    return [{ h: +m[1], w: +m[2], x: +m[3], y: +m[4], z: +m[5], color: '#' + m[6] }];
+  });
+}
+
+export async function generateBricks(
+  image?: File,
+  prompt?: string,
+): Promise<BrickResponse> {
+  const form = new FormData();
+  if (image) form.append("image", image);
+  if (prompt) form.append("prompt", prompt);
+  const res = await fetch(`${API_BASE}/api/generate-bricks`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Request failed" }));
+    throw new Error(err.detail ?? `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
 // ── Gallery types ────────────────────────────────────────────────────
 
 export interface GalleryBuild {
@@ -86,7 +136,7 @@ export interface GalleryBuild {
 
 // ── API client ────────────────────────────────────────────────────────
 
-const API_BASE = import.meta.env.VITE_API_URL ?? `${window.location.protocol}//${window.location.hostname}:8000`;
+const API_BASE = import.meta.env.VITE_API_URL ?? '';
 
 export async function generateBuild(
   image: File,
@@ -152,12 +202,13 @@ export async function listGalleryBuilds(params?: {
   sort?: string;
   q?: string;
 }): Promise<GalleryBuild[]> {
-  const url = new URL(`${API_BASE}/api/gallery`);
-  if (params?.category) url.searchParams.set('category', params.category);
-  if (params?.sort) url.searchParams.set('sort', params.sort);
-  if (params?.q) url.searchParams.set('q', params.q);
+  const query = new URLSearchParams();
+  if (params?.category) query.set('category', params.category);
+  if (params?.sort) query.set('sort', params.sort);
+  if (params?.q) query.set('q', params.q);
+  const qs = query.toString();
 
-  const res = await fetch(url.toString());
+  const res = await fetch(`${API_BASE}/api/gallery${qs ? `?${qs}` : ''}`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }

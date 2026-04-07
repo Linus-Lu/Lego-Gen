@@ -2,6 +2,8 @@ import { useMemo } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import BrickMesh, { getBrickSize } from './BrickMesh';
+import BrickCoordViewer from './BrickCoordViewer';
+import { parseBrickString } from '../api/legogen';
 import type { BuildStep } from '../api/legogen';
 
 interface GuidanceViewerProps {
@@ -10,6 +12,7 @@ interface GuidanceViewerProps {
   /** Index of the brick within the current step that is being narrated (0-based). -1 = none */
   narratedBrickIdx?: number;
   exploded?: boolean;
+  brickString?: string;
 }
 
 const STEP_Y_BASE = 0;
@@ -36,19 +39,34 @@ function GuidanceScene({ steps, currentStep, narratedBrickIdx = -1, exploded = f
       const extraSpread = exploded ? stepIdx * EXPLODED_SPREAD : 0;
       const baseY = STEP_Y_BASE + stepIdx * LAYER_HEIGHT + extraSpread;
 
+      const hasGridPos = step.parts.some(p => p.grid_positions || p.grid_pos);
+      const stepBricks: BrickData[] = [];
+      const positions: [number, number, number][] = [];
+
       let partIdx = 0;
       for (const part of step.parts) {
         const size = getBrickSize(part);
         for (let q = 0; q < part.quantity; q++) {
-          const col = partIdx % 6;
-          const row = Math.floor(partIdx / 6);
-          const x = (col - 2.5) * (size[0] + 0.15);
-          const z = (row - 1) * (size[2] + 0.15);
-          const y = baseY + size[1] / 2;
+          let x: number, z: number;
 
-          result.push({
+          if (hasGridPos) {
+            // Use per-instance grid_positions, fall back to grid_pos + offset
+            const gx = part.grid_positions?.[q]?.[0] ?? ((part.grid_pos?.[0] ?? 0) + q * size[0]);
+            const gz = part.grid_positions?.[q]?.[1] ?? (part.grid_pos?.[1] ?? 0);
+            x = gx + size[0] / 2;
+            z = gz + size[2] / 2;
+          } else {
+            // Fallback: simple grid layout
+            const col = partIdx % 6;
+            const row = Math.floor(partIdx / 6);
+            x = (col - 2.5) * (size[0] + 0.15);
+            z = (row - 1) * (size[2] + 0.15);
+          }
+
+          positions.push([x, baseY + size[1] / 2, z]);
+          stepBricks.push({
             key: `gbrick-${globalIdx}`,
-            position: [x, y, z],
+            position: [0, 0, 0],
             size,
             color: part.color_hex,
             isTrans: part.is_trans ?? part.color.toLowerCase().includes('trans'),
@@ -59,6 +77,19 @@ function GuidanceScene({ steps, currentStep, narratedBrickIdx = -1, exploded = f
           globalIdx++;
         }
       }
+
+      // Center the footprint around the origin
+      if (positions.length > 0) {
+        const allX = positions.map(p => p[0]);
+        const allZ = positions.map(p => p[2]);
+        const cx = (Math.min(...allX) + Math.max(...allX)) / 2;
+        const cz = (Math.min(...allZ) + Math.max(...allZ)) / 2;
+        for (let i = 0; i < stepBricks.length; i++) {
+          stepBricks[i].position = [positions[i][0] - cx, positions[i][1], positions[i][2] - cz];
+        }
+      }
+
+      result.push(...stepBricks);
     }
 
     return result;
@@ -127,7 +158,12 @@ function GuidanceScene({ steps, currentStep, narratedBrickIdx = -1, exploded = f
 }
 
 export default function GuidanceViewer(props: GuidanceViewerProps) {
-  const { steps, currentStep } = props;
+  const { steps, currentStep, brickString } = props;
+
+  if (brickString) {
+    const bricks = parseBrickString(brickString);
+    return <BrickCoordViewer bricks={bricks} />;
+  }
 
   if (!steps.length) {
     return (

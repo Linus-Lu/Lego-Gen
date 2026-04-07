@@ -835,3 +835,17 @@ class UnifiedPipeline:
             },
             "validation": validation,
         }
+
+    def generate_brick_build(self, caption: str) -> dict:
+        """Generate a brick-coordinate build from text using Stage 2 brick model."""
+        from backend.inference.brick_pipeline import BrickPipeline
+        if not hasattr(self, '_brick_pipeline'):
+            self._brick_pipeline = BrickPipeline(device=str(self.model.device))
+        return self._brick_pipeline.generate(caption)
+
+    def generate_brick_build_from_image(self, image) -> dict:
+        """Two-stage: image → Stage 1 caption → Stage 2 bricks."""
+        caption = self.describe_image_stage1(image)
+        result = self.generate_brick_build(caption)
+        result["caption"] = caption
+        return result

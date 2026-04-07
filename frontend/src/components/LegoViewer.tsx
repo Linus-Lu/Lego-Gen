@@ -2,6 +2,8 @@ import { useMemo } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import BrickMesh, { getBrickSize } from './BrickMesh';
+import BrickCoordViewer from './BrickCoordViewer';
+import { parseBrickString } from '../api/legogen';
 import type { BuildStep } from '../api/legogen';
 
 // ── Props ─────────────────────────────────────────────────────────────
@@ -9,6 +11,7 @@ import type { BuildStep } from '../api/legogen';
 interface LegoViewerProps {
   steps: BuildStep[];
   currentStep: number;
+  brickString?: string;
 }
 
 // ── Layout engine ────────────────────────────────────────────────────
@@ -30,7 +33,7 @@ interface PlacedBrick {
  * Fills rows left-to-right, wrapping when a row exceeds the target width.
  */
 function packLayer(
-  parts: { size: [number, number, number]; color: string; isTrans: boolean; quantity: number; gridPos?: [number, number] }[],
+  parts: { size: [number, number, number]; color: string; isTrans: boolean; quantity: number; gridPos?: [number, number]; gridPositions?: [number, number][] }[],
   baseY: number,
   stepNum: number,
   startIdx: number,
@@ -38,18 +41,17 @@ function packLayer(
   const bricks: PlacedBrick[] = [];
   let idx = startIdx;
 
-  // If parts have grid_pos, use it for placement
-  const hasGridPos = parts.some(p => p.gridPos != null);
+  // If parts have per-instance grid_positions, use them for placement
+  const hasGridPos = parts.some(p => p.gridPositions != null || p.gridPos != null);
   if (hasGridPos) {
     const positions: [number, number, number][] = [];
     for (const p of parts) {
       const [w, h, d] = p.size;
-      const gx = p.gridPos?.[0] ?? 0;
-      const gz = p.gridPos?.[1] ?? 0;
       for (let q = 0; q < p.quantity; q++) {
-        const x = (gx + q * w);
-        const z = gz;
-        positions.push([x + w / 2, baseY + h / 2, z + d / 2]);
+        // Prefer per-instance grid_positions, fall back to grid_pos + linear offset
+        const gx = p.gridPositions?.[q]?.[0] ?? ((p.gridPos?.[0] ?? 0) + q * w);
+        const gz = p.gridPositions?.[q]?.[1] ?? (p.gridPos?.[1] ?? 0);
+        positions.push([gx + w / 2, baseY + h / 2, gz + d / 2]);
         bricks.push({
           key: `brick-${idx}`,
           position: [0, 0, 0],
@@ -164,6 +166,7 @@ function Scene({ steps, currentStep }: LegoViewerProps) {
         isTrans: part.is_trans ?? part.color.toLowerCase().includes('trans'),
         quantity: part.quantity,
         gridPos: part.grid_pos,
+        gridPositions: part.grid_positions,
       }));
 
       const { bricks: layerBricks, layerHeight, nextIdx } = packLayer(
@@ -229,7 +232,11 @@ function Scene({ steps, currentStep }: LegoViewerProps) {
 
 // ── Main component ────────────────────────────────────────────────────
 
-const LegoViewer: React.FC<LegoViewerProps> = ({ steps, currentStep }) => {
+const LegoViewer: React.FC<LegoViewerProps> = ({ steps, currentStep, brickString }) => {
+  if (brickString) {
+    const bricks = parseBrickString(brickString);
+    return <BrickCoordViewer bricks={bricks} />;
+  }
   if (!steps.length) {
     return (
       <div className="w-full h-full bg-gray-800 rounded-lg flex items-center justify-center min-h-[300px] border-2 border-dashed border-gray-700">

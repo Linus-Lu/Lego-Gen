@@ -13,11 +13,11 @@ export default function PartsChecklist({ parts, highlightPartId }: PartsChecklis
     setChecked(new Set());
   }, [parts]);
 
-  const toggle = (partId: string) => {
+  const toggle = (uid: string) => {
     setChecked((prev) => {
       const next = new Set(prev);
-      if (next.has(partId)) next.delete(partId);
-      else next.add(partId);
+      if (next.has(uid)) next.delete(uid);
+      else next.add(uid);
       return next;
     });
   };
@@ -29,12 +29,13 @@ export default function PartsChecklist({ parts, highlightPartId }: PartsChecklis
   return (
     <div className="space-y-1">
       <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Parts Checklist</h4>
-      {parts.map((part) => {
+      {parts.map((part, i) => {
+        const uid = `${part.part_id}-${part.color_hex}-${i}`;
         const isHighlighted = part.part_id === highlightPartId;
-        const isChecked = checked.has(part.part_id);
+        const isChecked = checked.has(uid);
         return (
           <label
-            key={part.part_id}
+            key={uid}
             className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg cursor-pointer transition-colors ${
               isHighlighted
                 ? 'bg-green-500/10 border border-green-500/20'
@@ -44,7 +45,7 @@ export default function PartsChecklist({ parts, highlightPartId }: PartsChecklis
             <input
               type="checkbox"
               checked={isChecked}
-              onChange={() => toggle(part.part_id)}
+              onChange={() => toggle(uid)}
               className="w-3.5 h-3.5 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500/30 focus:ring-offset-0"
             />
             <span

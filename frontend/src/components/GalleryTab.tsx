@@ -19,8 +19,10 @@ export default function GalleryTab() {
           sort,
           q: search || undefined,
         });
+        console.log('[GalleryTab] fetched builds:', data.length, data);
         setBuilds(data);
-      } catch {
+      } catch (err) {
+        console.error('[GalleryTab] fetch error:', err);
         setBuilds([]);
       } finally {
         setLoading(false);

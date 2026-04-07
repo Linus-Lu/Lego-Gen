@@ -74,3 +74,27 @@ async def generate_from_text(
     result = pipeline.generate_build_from_text(prompt.strip())
 
     return result
+
+
+@router.post("/generate-bricks")
+async def generate_bricks(
+    image: UploadFile = File(default=None),
+    prompt: str = Form(default=""),
+):
+    """Generate a brick-coordinate LEGO model from image or text."""
+    from backend.app import get_pipeline
+
+    pipeline = get_pipeline()
+
+    if image and image.filename:
+        from PIL import Image as PILImage
+        import io
+        contents = await image.read()
+        pil_image = PILImage.open(io.BytesIO(contents)).convert("RGB")
+        result = pipeline.generate_brick_build_from_image(pil_image)
+    elif prompt:
+        result = pipeline.generate_brick_build(prompt)
+    else:
+        raise HTTPException(status_code=400, detail="Provide an image or prompt")
+
+    return result
