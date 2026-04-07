@@ -101,7 +101,7 @@ STAGE1_MAX_SEQ_LENGTH = 512       # descriptions are short
 # ── Stage 2: Brick coordinate model ────────────────────────────────────
 BRICK_MODEL_NAME = "Qwen/Qwen3.5-4B"
 BRICK_CHECKPOINT_DIR = CHECKPOINT_DIR / "qwen35-4b-brick-lora"
-BRICK_LEARNING_RATE = 2e-3
+BRICK_LEARNING_RATE = 1e-3
 BRICK_BATCH_SIZE = 1
 BRICK_GRADIENT_ACCUMULATION = 16
 BRICK_MAX_SEQ_LENGTH = 4096
