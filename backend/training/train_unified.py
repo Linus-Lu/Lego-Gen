@@ -139,6 +139,17 @@ class EpochUpdateCallback(TrainerCallback):
         print(f"  Epoch {epoch}: updated dataset prompt rotation")
 
 
+class MemoryCleanupCallback(TrainerCallback):
+    """Free GPU memory after evaluation to prevent OOM on next training steps."""
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print(f"  [MemoryCleanup] freed GPU cache after eval at step {state.global_step}")
+
+
 class ProgressCallback(TrainerCallback):
     """Log a milestone every 10% of training."""
 
@@ -302,7 +313,7 @@ def main():
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         report_to="wandb" if not args.no_wandb else "none",
-        dataloader_num_workers=4,
+        dataloader_num_workers=2,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         remove_unused_columns=False,
@@ -330,14 +341,20 @@ def main():
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
 
-            # Per-token cross-entropy (no reduction)
-            loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
-            flat_logits = shift_logits.view(-1, shift_logits.size(-1))
-            flat_labels = shift_labels.view(-1)
-            per_token_loss = loss_fct(flat_logits, flat_labels)
-
             # Apply structure-aware weights
             weights = structure_weights.get_weights(shift_labels).view(-1)
+
+            # Chunked cross-entropy to avoid OOM on large vocab
+            CHUNK_SIZE = 256  # process 256 tokens at a time
+            loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+            seq_len = shift_logits.size(1)
+            all_losses = []
+            for i in range(0, seq_len, CHUNK_SIZE):
+                chunk_logits = shift_logits[:, i:i+CHUNK_SIZE, :].reshape(-1, shift_logits.size(-1))
+                chunk_labels = shift_labels[:, i:i+CHUNK_SIZE].reshape(-1)
+                all_losses.append(loss_fct(chunk_logits, chunk_labels))
+            per_token_loss = torch.cat(all_losses)
+
             weighted_loss = (per_token_loss * weights).sum() / weights.sum().clamp(min=1.0)
 
             return (weighted_loss, outputs) if return_outputs else weighted_loss
@@ -353,6 +370,7 @@ def main():
         data_collator=UnifiedCollator(),
         callbacks=[
             EpochUpdateCallback(train_ds, val_ds, sampler=curriculum_sampler),
+            MemoryCleanupCallback(),
             ProgressCallback(),
         ],
     )

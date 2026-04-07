@@ -6,35 +6,59 @@ import type { BrickCoord } from '../api/legogen';
 
 interface BrickCoordViewerProps {
   bricks: BrickCoord[];
+  /** Z-levels array (sorted), one per step. */
+  zLevels?: number[];
+  /** 1-indexed current step. */
+  currentStep?: number;
 }
 
 const STUD = 1.0;
 const BRICK_H = 1.0;
 
-function Scene({ bricks }: BrickCoordViewerProps) {
+function Scene({ bricks, zLevels, currentStep }: BrickCoordViewerProps) {
   const placed = useMemo(() => {
     if (!bricks.length) return [];
-    const positions = bricks.map(b => ({
-      position: [
-        (b.x + b.h / 2) * STUD,
-        b.z * BRICK_H + BRICK_H / 2,
-        (b.y + b.w / 2) * STUD,
-      ] as [number, number, number],
-      size: [b.h * STUD, BRICK_H, b.w * STUD] as [number, number, number],
-      color: b.color,
-    }));
-    const allX = positions.map(p => p.position[0]);
-    const allY = positions.map(p => p.position[1]);
-    const allZ = positions.map(p => p.position[2]);
+
+    // Determine which z-level corresponds to the current step
+    const maxVisibleZ = (zLevels && currentStep != null)
+      ? (zLevels[currentStep - 1] ?? Infinity)
+      : Infinity;
+    const currentZ = (zLevels && currentStep != null)
+      ? (zLevels[currentStep - 1] ?? -1)
+      : -1;
+
+    const positions = bricks
+      .filter(b => b.z <= maxVisibleZ)
+      .map(b => ({
+        position: [
+          (b.x + b.h / 2) * STUD,
+          b.z * BRICK_H + BRICK_H / 2,
+          (b.y + b.w / 2) * STUD,
+        ] as [number, number, number],
+        size: [b.h * STUD, BRICK_H, b.w * STUD] as [number, number, number],
+        color: b.color,
+        isCurrent: b.z === currentZ,
+      }));
+
+    // Center around origin using ALL bricks (not just visible) for stable framing
+    const allPositions = bricks.map(b => [
+      (b.x + b.h / 2) * STUD,
+      b.z * BRICK_H + BRICK_H / 2,
+      (b.y + b.w / 2) * STUD,
+    ]);
+    const allX = allPositions.map(p => p[0]);
+    const allY = allPositions.map(p => p[1]);
+    const allZ = allPositions.map(p => p[2]);
     const cx = (Math.min(...allX) + Math.max(...allX)) / 2;
     const cy = Math.min(...allY);
     const cz = (Math.min(...allZ) + Math.max(...allZ)) / 2;
+
     return positions.map((p, i) => ({
       ...p,
       position: [p.position[0] - cx, p.position[1] - cy, p.position[2] - cz] as [number, number, number],
       key: `brick-${i}`,
     }));
-  }, [bricks]);
+  }, [bricks, zLevels, currentStep]);
 
   return (
     <>
@@ -46,7 +70,8 @@ function Scene({ bricks }: BrickCoordViewerProps) {
         fadeDistance={25} position={[0, -0.01, 0]} />
       {placed.map(b => (
         <BrickMesh key={b.key} position={b.position} size={b.size}
-          color={b.color} isTrans={false} opacity={1} />
+          color={b.color} isTrans={false}
+          opacity={b.isCurrent ? 1.0 : 0.35} />
       ))}
       <OrbitControls makeDefault enableDamping dampingFactor={0.1}
         minDistance={3} maxDistance={30} />
@@ -54,7 +79,7 @@ function Scene({ bricks }: BrickCoordViewerProps) {
   );
 }
 
-const BrickCoordViewer: React.FC<BrickCoordViewerProps> = ({ bricks }) => {
+const BrickCoordViewer: React.FC<BrickCoordViewerProps> = ({ bricks, zLevels, currentStep }) => {
   if (!bricks.length) {
     return (
       <div className="w-full h-full bg-gray-800 rounded-lg flex items-center justify-center min-h-[300px] border-2 border-dashed border-gray-700">
@@ -70,7 +95,7 @@ const BrickCoordViewer: React.FC<BrickCoordViewerProps> = ({ bricks }) => {
       <Canvas camera={{ position: [12, 10, 12], fov: 45 }} shadows gl={{ antialias: true }}>
         <color attach="background" args={['#1a1a2e']} />
         <fog attach="fog" args={['#1a1a2e', 20, 40]} />
-        <Scene bricks={bricks} />
+        <Scene bricks={bricks} zLevels={zLevels} currentStep={currentStep} />
       </Canvas>
     </div>
   );

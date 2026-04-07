@@ -22,6 +22,11 @@
 # ══════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
+# ── Ensure /workspace/pylibs is on PYTHONPATH (torch lives there) ────
+if [ -d "/workspace/pylibs" ]; then
+    export PYTHONPATH="${PYTHONPATH:-}:/workspace/pylibs"
+fi
+
 # ── Parse args ────────────────────────────────────────────────────────
 SKIP_TRAINING=false
 SKIP_COCO=false
@@ -178,8 +183,9 @@ fi
 # ══════════════════════════════════════════════════════════════════════
 log "6/8 Preparing StableText2Brick dataset"
 
-if [ -d "data/st2b_labels" ] && [ "$(ls data/st2b_labels/*.json 2>/dev/null | wc -l)" -gt 1000 ]; then
-    ok "ST2B labels already present ($(ls data/st2b_labels/*.json | wc -l) files)"
+ST2B_COUNT=$(find data/st2b_labels -name '*.json' 2>/dev/null | wc -l)
+if [ -d "data/st2b_labels" ] && [ "$ST2B_COUNT" -gt 1000 ]; then
+    ok "ST2B labels already present ($ST2B_COUNT files)"
 else
     echo "Converting StableText2Brick dataset (downloads from HuggingFace)..."
     python scripts/convert_st2b.py
@@ -187,7 +193,7 @@ else
 fi
 
 # Add grid_pos to ST2B labels
-SAMPLE=$(ls data/st2b_labels/*.json 2>/dev/null | head -1)
+SAMPLE=$(find data/st2b_labels -name '*.json' -print -quit 2>/dev/null)
 if [ -n "$SAMPLE" ] && python3 -c "import json; d=json.load(open('$SAMPLE')); assert 'grid_pos' in d.get('subassemblies',[{}])[0].get('parts',[{}])[0]" 2>/dev/null; then
     ok "grid_pos already present in ST2B labels"
 else

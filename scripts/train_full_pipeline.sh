@@ -18,6 +18,11 @@
 # ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
+# ── Ensure /workspace/pylibs is on PYTHONPATH (torch lives there) ────
+if [ -d "/workspace/pylibs" ]; then
+    export PYTHONPATH="${PYTHONPATH:-}:/workspace/pylibs"
+fi
+
 cd "$(dirname "$0")/.."
 PROJECT_ROOT=$(pwd)
 
@@ -61,7 +66,7 @@ if [ "$STAGE1_ONLY" = false ]; then
     log "Step 1/5: Adding grid_pos to ST2B labels"
 
     # Check if already processed (sample a file for grid_pos)
-    SAMPLE=$(ls data/st2b_labels/*.json 2>/dev/null | head -1)
+    SAMPLE=$(find data/st2b_labels -name '*.json' -print -quit 2>/dev/null)
     if [ -n "$SAMPLE" ] && python3 -c "import json; d=json.load(open('$SAMPLE')); assert 'grid_pos' in d.get('subassemblies',[{}])[0].get('parts',[{}])[0]" 2>/dev/null; then
         echo "grid_pos already present, skipping."
     else
@@ -111,12 +116,7 @@ if [ "$STAGE2_ONLY" = false ]; then
 
     if [ -f "data/stage1_manifest.json" ]; then
         COUNT=$(python3 -c "import json; print(len(json.load(open('data/stage1_manifest.json'))))")
-        echo "Manifest already exists with $COUNT samples."
-        read -p "Rebuild? [y/N] " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            python -m backend.data_pipeline.build_stage1_dataset
-        fi
+        echo "Manifest already exists with $COUNT samples. Skipping rebuild."
     else
         python -m backend.data_pipeline.build_stage1_dataset
     fi

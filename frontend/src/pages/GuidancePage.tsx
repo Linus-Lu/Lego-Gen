@@ -5,7 +5,7 @@ import GuidanceViewer from '../components/GuidanceViewer';
 import StepControls from '../components/StepControls';
 import PartsChecklist from '../components/PartsChecklist';
 import VoiceNarrator from '../components/VoiceNarrator';
-import { getGalleryBuild } from '../api/legogen';
+import { getGalleryBuild, parseBrickString, bricksToSteps } from '../api/legogen';
 import type { GenerateResponse, BuildStep } from '../api/legogen';
 
 export default function GuidancePage() {
@@ -22,6 +22,8 @@ export default function GuidancePage() {
   const [buildTitle, setBuildTitle] = useState('Build');
   const [isComplete, setIsComplete] = useState(false);
   const [voiceMuted, setVoiceMuted] = useState(false);
+  const [brickString, setBrickString] = useState('');
+  const [zLevels, setZLevels] = useState<number[]>([]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const narratorRef = useRef(new VoiceNarrator());
@@ -46,8 +48,14 @@ export default function GuidancePage() {
         try {
           const build = await getGalleryBuild(buildId);
           const desc = JSON.parse(build.description_json);
-          // Re-derive steps from description_json (same structure as GenerateResponse)
-          if (desc.steps) {
+          // Brick-coordinate format (new pipeline)
+          if (desc.bricks) {
+            setBrickString(desc.bricks);
+            const parsed = parseBrickString(desc.bricks);
+            const { steps: derivedSteps, zLevels: derivedZ } = bricksToSteps(parsed);
+            setSteps(derivedSteps);
+            setZLevels(derivedZ);
+          } else if (desc.steps) {
             setSteps(desc.steps);
           } else if (desc.subassemblies) {
             // Convert subassemblies to build steps
@@ -243,6 +251,8 @@ export default function GuidancePage() {
             currentStep={currentStep}
             narratedBrickIdx={narratedBrickIdx}
             exploded={exploded}
+            brickString={brickString}
+            zLevels={zLevels}
           />
         </div>
       </div>

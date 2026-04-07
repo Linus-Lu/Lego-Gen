@@ -101,6 +101,58 @@ export function parseBrickString(raw: string): BrickCoord[] {
   });
 }
 
+const LDRAW_IDS: Record<string, string> = {
+  '1x1': '3005', '1x2': '3004', '2x1': '3004',
+  '2x2': '3003', '1x4': '3010', '4x1': '3010',
+  '2x4': '3001', '4x2': '3001', '1x6': '3009', '6x1': '3009',
+  '2x6': '2456', '6x2': '2456', '1x8': '3008', '8x1': '3008',
+};
+
+/** Convert brick coordinates into build steps grouped by z-layer. */
+export function bricksToSteps(bricks: BrickCoord[]): { steps: BuildStep[]; zLevels: number[] } {
+  const byZ = new Map<number, BrickCoord[]>();
+  for (const b of bricks) {
+    const group = byZ.get(b.z) ?? [];
+    group.push(b);
+    byZ.set(b.z, group);
+  }
+
+  const zLevels = [...byZ.keys()].sort((a, b) => a - b);
+
+  const steps: BuildStep[] = zLevels.map((z, i) => {
+    const layerBricks = byZ.get(z)!;
+
+    // Group by (dims, color) for parts list
+    const partMap = new Map<string, { dims: string; color: string; count: number }>();
+    for (const b of layerBricks) {
+      const dims = `${b.h}x${b.w}`;
+      const key = `${dims}-${b.color}`;
+      const existing = partMap.get(key);
+      if (existing) existing.count++;
+      else partMap.set(key, { dims, color: b.color, count: 1 });
+    }
+
+    const parts: Part[] = [...partMap.values()].map(({ dims, color, count }) => ({
+      part_id: LDRAW_IDS[dims] ?? '0000',
+      name: `Brick ${dims}`,
+      category: 'Bricks',
+      color: color.replace('#', ''),
+      color_hex: color,
+      quantity: count,
+    }));
+
+    return {
+      step_number: i + 1,
+      title: `Layer ${z} — height ${z}`,
+      instruction: `Place ${layerBricks.length} brick${layerBricks.length > 1 ? 's' : ''} at height ${z}`,
+      parts,
+      part_count: layerBricks.length,
+    };
+  });
+
+  return { steps, zLevels };
+}
+
 export async function generateBricks(
   image?: File,
   prompt?: string,

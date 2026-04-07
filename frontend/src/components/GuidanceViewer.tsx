@@ -13,6 +13,7 @@ interface GuidanceViewerProps {
   narratedBrickIdx?: number;
   exploded?: boolean;
   brickString?: string;
+  zLevels?: number[];
 }
 
 const STEP_Y_BASE = 0;
@@ -158,11 +159,11 @@ function GuidanceScene({ steps, currentStep, narratedBrickIdx = -1, exploded = f
 }
 
 export default function GuidanceViewer(props: GuidanceViewerProps) {
-  const { steps, currentStep, brickString } = props;
+  const { steps, currentStep, brickString, zLevels } = props;
 
   if (brickString) {
     const bricks = parseBrickString(brickString);
-    return <BrickCoordViewer bricks={bricks} />;
+    return <BrickCoordViewer bricks={bricks} zLevels={zLevels} currentStep={currentStep} />;
   }
 
   if (!steps.length) {

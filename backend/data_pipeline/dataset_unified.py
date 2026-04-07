@@ -204,10 +204,17 @@ class UnifiedLegoDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         sample_type, paths = self.samples[idx]
 
-        if sample_type == "vision":
-            result = self._get_vision_sample(paths)
-        else:
-            result = self._get_text_sample(paths, idx)
+        try:
+            if sample_type == "vision":
+                result = self._get_vision_sample(paths)
+            else:
+                result = self._get_text_sample(paths, idx)
+        except (json.JSONDecodeError, KeyError, OSError) as exc:
+            # Corrupted/empty file — log once and fall back to a nearby sample
+            label_path = paths.get("label_path", "unknown")
+            print(f"WARNING: skipping corrupt sample idx={idx} ({label_path}): {exc}")
+            fallback_idx = (idx + 1) % len(self.samples)
+            return self.__getitem__(fallback_idx)
 
         # Track actual truncation: if the last non-pad token is at max_length-1,
         # the sequence was likely truncated.
