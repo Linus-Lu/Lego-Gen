@@ -29,8 +29,8 @@ except ImportError:
     UNIFIED_QUANTIZATION_BITS = 4
 
 # Unified LoRA config — Qwen3.5 hybrid DeltaNet/Attention arch needs all-linear
-UNIFIED_LORA_R = 128        # higher rank for 27B model capacity
-UNIFIED_LORA_ALPHA = 256
+UNIFIED_LORA_R = 64         # rank 64 sufficient for 9B model
+UNIFIED_LORA_ALPHA = 128
 UNIFIED_LORA_DROPOUT = 0.05
 UNIFIED_LORA_TARGET_MODULES = "all-linear"
 

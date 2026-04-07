@@ -127,12 +127,12 @@ fi
 # ══════════════════════════════════════════════════════════════════════
 if [ "$STAGE1_ONLY" = false ]; then
     log "Step 4/5: Training Stage 2 (text → LEGO JSON)"
-    echo "Model: Qwen3.5-27B + LoRA rank 128"
+    echo "Model: Qwen3.5-9B + LoRA rank 128"
     echo "Data: ST2B-only (~46k samples), structure-aware loss"
-    echo "Output: backend/models/checkpoints/qwen35-27b-lego-stage2-lora/"
+    echo "Output: backend/models/checkpoints/qwen35-9b-lego-stage2-lora/"
     echo ""
 
-    STAGE2_DIR="backend/models/checkpoints/qwen35-27b-lego-stage2-lora"
+    STAGE2_DIR="backend/models/checkpoints/qwen35-9b-lego-stage2-lora"
     mkdir -p "$STAGE2_DIR"
 
     python -m backend.training.train_unified \
@@ -151,9 +151,9 @@ fi
 # ══════════════════════════════════════════════════════════════════════
 if [ "$STAGE2_ONLY" = false ]; then
     log "Step 5/5: Training Stage 1 (image → description)"
-    echo "Model: Qwen3.5-27B + LoRA rank 32"
+    echo "Model: Qwen3.5-9B + LoRA rank 32"
     echo "Data: COCO + Rebrickable images"
-    echo "Output: backend/models/checkpoints/qwen35-27b-lego-stage1-lora/"
+    echo "Output: backend/models/checkpoints/qwen35-9b-lego-stage1-lora/"
     echo ""
 
     if [ ! -f "data/stage1_manifest.json" ]; then
@@ -175,11 +175,11 @@ fi
 log "All training complete! Total time: $(elapsed)"
 echo ""
 echo "Checkpoints:"
-echo "  Stage 2: backend/models/checkpoints/qwen35-27b-lego-stage2-lora/"
-echo "  Stage 1: backend/models/checkpoints/qwen35-27b-lego-stage1-lora/"
+echo "  Stage 2: backend/models/checkpoints/qwen35-9b-lego-stage2-lora/"
+echo "  Stage 1: backend/models/checkpoints/qwen35-9b-lego-stage1-lora/"
 echo ""
 echo "To start the server with new checkpoints:"
 echo "  LEGOGEN_DEV=0 uvicorn backend.app:app --host 0.0.0.0 --port 8000"
 echo ""
 echo "Update backend/config.py if checkpoint paths differ:"
-echo "  UNIFIED_CHECKPOINT_DIR = CHECKPOINT_DIR / 'qwen35-27b-lego-stage2-lora'"
+echo "  UNIFIED_CHECKPOINT_DIR = CHECKPOINT_DIR / 'qwen35-9b-lego-stage2-lora'"
