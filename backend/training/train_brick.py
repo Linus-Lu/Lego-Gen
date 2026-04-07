@@ -1,15 +1,28 @@
-"""Fine-tune Qwen3.5-4B with LoRA for text → colored brick sequence generation."""
+"""Fine-tune Qwen3.5-4B with LoRA for text → colored brick sequence generation.
+
+Features ported from train_unified.py:
+  - Structure-aware loss weighting (upweight coordinates/dimensions)
+  - Curriculum ordering (untruncated samples first)
+  - Chunked cross-entropy (avoids OOM on 248K vocab)
+"""
 
 import inspect
+import json
 import sys
 from pathlib import Path
+
+import torch
+from torch.utils.data import Dataset, Sampler
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+from transformers import (
+    AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer,
+    TrainerCallback,
+)
 from trl import SFTTrainer
 
 # Check if SFTConfig exists (TRL >= 0.12)
@@ -24,6 +37,141 @@ from backend.config import (
     BRICK_NUM_EPOCHS, BRICK_LORA_R, BRICK_LORA_ALPHA, BRICK_LORA_DROPOUT,
     BRICK_TRAINING_DATA,
 )
+
+
+# ── Structure-aware loss for brick format ─────────────────────────────────
+
+class BrickStructureWeights:
+    """Per-token loss weights for brick coordinate format.
+
+    Brick format: "2x4 (5,3,0) #C91A09"
+      - Boilerplate: parentheses, commas, 'x', '#', newlines, spaces → weight 0.1
+      - Coordinates/dimensions (the actual numbers) → weight 1.0 (default)
+      - Structural tokens: dimension combos like "2x4", coordinate digits → weight 3.0
+    """
+
+    def __init__(self, tokenizer, boilerplate_weight=0.1, structure_weight=3.0):
+        self.boilerplate_weight = boilerplate_weight
+        self.structure_weight = structure_weight
+
+        # Boilerplate: syntax characters that repeat in every brick line
+        self.boilerplate_ids: set[int] = set()
+        for char in ["(", ")", ",", "x", "#", "\n", " ", "(,", "),",
+                     "  ", "    ", "\n\n"]:
+            ids = tokenizer.encode(char, add_special_tokens=False)
+            self.boilerplate_ids.update(ids)
+
+        # Structure: brick dimensions and coordinate patterns
+        self.structure_ids: set[int] = set()
+        for word in ["2x4", "4x2", "2x6", "6x2", "1x2", "2x1",
+                     "1x4", "4x1", "1x6", "6x1", "1x8", "8x1",
+                     "1x1", "2x2"]:
+            ids = tokenizer.encode(word, add_special_tokens=False)
+            self.structure_ids.update(ids)
+
+        # Remove overlap (structure wins)
+        self.boilerplate_ids -= self.structure_ids
+
+        print(f"[BrickStructureWeights] boilerplate token IDs: {len(self.boilerplate_ids)}, "
+              f"structure token IDs: {len(self.structure_ids)}")
+
+    def get_weights(self, labels: torch.Tensor) -> torch.Tensor:
+        """Return per-token weights. Shape matches labels."""
+        weights = torch.ones_like(labels, dtype=torch.float32)
+
+        for tid in self.boilerplate_ids:
+            weights[labels == tid] = self.boilerplate_weight
+        for tid in self.structure_ids:
+            weights[labels == tid] = self.structure_weight
+
+        # Masked tokens (-100) get weight 0
+        weights[labels == -100] = 0.0
+        return weights
+
+
+# ── Curriculum dataset & sampler ──────────────────────────────────────────
+
+class BrickCurriculumDataset(Dataset):
+    """Wraps a HF dataset with curriculum ordering: untruncated samples first."""
+
+    def __init__(self, hf_dataset, max_seq_length: int):
+        self.hf_dataset = hf_dataset
+        self.max_seq_length = max_seq_length
+
+        # Estimate token count from assistant content length (~3 chars/token)
+        # plus prompt overhead (~80 tokens for system + user template)
+        PROMPT_OVERHEAD = 80
+        CHARS_PER_TOKEN = 3.0
+
+        fits, truncated = [], []
+        for i in range(len(hf_dataset)):
+            messages = hf_dataset[i]["messages"]
+            # Assistant content is the last message
+            assistant_len = len(messages[-1]["content"]) if messages else 0
+            est_tokens = int(assistant_len / CHARS_PER_TOKEN) + PROMPT_OVERHEAD
+            if est_tokens <= max_seq_length:
+                fits.append(i)
+            else:
+                truncated.append(i)
+
+        self.indices = fits + truncated
+        self.n_untruncated = len(fits)
+        self.n_truncated = len(truncated)
+
+        print(f"  Curriculum: {len(fits)} untruncated, "
+              f"{len(truncated)} truncated ({len(truncated)*100/max(1,len(self.indices)):.1f}%) "
+              f"at max_seq_length={max_seq_length}")
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        return self.hf_dataset[self.indices[idx]]
+
+
+class CurriculumSampler(Sampler):
+    """Samples untruncated indices (shuffled) first, then truncated (shuffled)."""
+
+    def __init__(self, dataset: BrickCurriculumDataset, seed: int = 42):
+        self.n_untruncated = dataset.n_untruncated
+        self.n_total = len(dataset)
+        self.seed = seed
+        self.epoch = 0
+
+    def __len__(self):
+        return self.n_total
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+
+    def __iter__(self):
+        g = torch.Generator()
+        g.manual_seed(self.seed + self.epoch)
+        untrunc = torch.randperm(self.n_untruncated, generator=g).tolist()
+        trunc = (torch.randperm(self.n_total - self.n_untruncated, generator=g) + self.n_untruncated).tolist()
+        return iter(untrunc + trunc)
+
+
+class EpochCallback(TrainerCallback):
+    """Update curriculum sampler epoch for reshuffling."""
+
+    def __init__(self, sampler):
+        self.sampler = sampler
+
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        epoch = int(state.epoch) if state.epoch else 0
+        self.sampler.set_epoch(epoch)
+        print(f"  Epoch {epoch}: updated curriculum sampler")
+
+
+class MemoryCleanupCallback(TrainerCallback):
+    """Free GPU memory after evaluation."""
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 def _inspect_params(cls):
@@ -74,6 +222,14 @@ def main() -> None:
         "test": str(test_path),
     })
 
+    # ── Curriculum ordering ──────────────────────────────────────────
+    print("Building curriculum ordering...", flush=True)
+    train_curriculum = BrickCurriculumDataset(ds["train"], BRICK_MAX_SEQ_LENGTH)
+    curriculum_sampler = CurriculumSampler(train_curriculum, seed=42)
+
+    # ── Structure-aware loss weights ─────────────────────────────────
+    structure_weights = BrickStructureWeights(tokenizer)
+
     output_dir = str(BRICK_CHECKPOINT_DIR)
 
     # ── Build training args (version-adaptive) ────────────────────────
@@ -112,7 +268,41 @@ def main() -> None:
     print(f"Using config class: {ConfigClass.__name__}", flush=True)
     training_args = ConfigClass(**config_kwargs)
 
-    # ── Build trainer (version-adaptive) ──────────────────────────────
+    # ── Build custom trainer with structure-aware loss + curriculum ───
+    class BrickTrainer(SFTTrainer):
+        """SFTTrainer with structure-aware loss and curriculum sampling."""
+
+        def _get_train_sampler(self):
+            return curriculum_sampler
+
+        def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+            labels = inputs.pop("labels")
+            outputs = model(**inputs)
+            logits = outputs.logits
+
+            # Shift for causal LM: predict next token
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+
+            # Apply structure-aware weights
+            weights = structure_weights.get_weights(shift_labels).view(-1)
+
+            # Chunked cross-entropy to avoid OOM on 248K vocab
+            CHUNK_SIZE = 256
+            loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+            seq_len = shift_logits.size(1)
+            all_losses = []
+            for i in range(0, seq_len, CHUNK_SIZE):
+                chunk_logits = shift_logits[:, i:i+CHUNK_SIZE, :].reshape(-1, shift_logits.size(-1))
+                chunk_labels = shift_labels[:, i:i+CHUNK_SIZE].reshape(-1)
+                all_losses.append(loss_fct(chunk_logits, chunk_labels))
+            per_token_loss = torch.cat(all_losses)
+
+            weighted_loss = (per_token_loss * weights).sum() / weights.sum().clamp(min=1.0)
+
+            return (weighted_loss, outputs) if return_outputs else weighted_loss
+
+    # ── Build trainer kwargs (version-adaptive) ──────────────────────
     trainer_params = _inspect_params(SFTTrainer)
     print(f"SFTTrainer accepts: processing_class={'processing_class' in trainer_params}, "
           f"tokenizer={'tokenizer' in trainer_params}, "
@@ -121,8 +311,12 @@ def main() -> None:
     trainer_kwargs = dict(
         model=model,
         args=training_args,
-        train_dataset=ds["train"],
+        train_dataset=train_curriculum,
         eval_dataset=ds["test"],
+        callbacks=[
+            EpochCallback(curriculum_sampler),
+            MemoryCleanupCallback(),
+        ],
     )
 
     # Pass tokenizer with the right param name
@@ -135,7 +329,7 @@ def main() -> None:
     if "max_seq_length" in trainer_params and "max_seq_length" not in config_kwargs:
         trainer_kwargs["max_seq_length"] = BRICK_MAX_SEQ_LENGTH
 
-    trainer = SFTTrainer(**trainer_kwargs)
+    trainer = BrickTrainer(**trainer_kwargs)
 
     print("Starting training...", flush=True)
     trainer.train()
