@@ -12,6 +12,41 @@ const STUD = 1.0;
 const BRICK_H = 1.2;
 const PLATE_H = 0.4;
 
+// ── Color fallback map (LEGO color name → hex) ─────────────────────
+// Used when model output is missing color_hex (truncation, malformed JSON)
+const COLOR_NAME_TO_HEX: Record<string, string> = {
+  'black': '#05131D', 'blue': '#0055BF', 'bright green': '#4B9F4A',
+  'bright light blue': '#9FC3E9', 'bright light orange': '#F8BB3D',
+  'bright light yellow': '#FFF03A', 'bright orange': '#FE8A18',
+  'bright pink': '#E4ADC8', 'coral': '#FF698F', 'dark azure': '#078BC9',
+  'dark blue': '#143044', 'dark bluish gray': '#6C6E68',
+  'dark brown': '#352100', 'dark green': '#184632',
+  'dark orange': '#A95500', 'dark pink': '#C870A0',
+  'dark red': '#720E0F', 'dark tan': '#958A73',
+  'dark turquoise': '#008F9B', 'green': '#237841', 'lavender': '#E1D5ED',
+  'light aqua': '#ADC3C0', 'light bluish gray': '#A0A5A9',
+  'light gray': '#9BA19D', 'light nougat': '#FCC39E',
+  'lime': '#BBE90B', 'magenta': '#923978', 'medium azure': '#36AEBF',
+  'medium blue': '#5A93DB', 'medium lavender': '#AC78BA',
+  'medium nougat': '#AA7D55', 'nougat': '#D09168',
+  'olive green': '#9B9A5A', 'orange': '#FE8A18',
+  'pearl gold': '#AA7F2E', 'red': '#C91A09', 'reddish brown': '#582A12',
+  'sand blue': '#596072', 'sand green': '#A0BCAC',
+  'tan': '#E4CD9E', 'teal': '#008F9B',
+  'trans-clear': '#FCFCFC', 'trans-light blue': '#C1DFF0',
+  'trans-red': '#C91A09', 'trans-green': '#84B68D',
+  'trans-orange': '#F08F1C', 'trans-yellow': '#F5CD2F',
+  'white': '#FFFFFF', 'yellow': '#F2CD37',
+  'bright orange': '#FE8A18', 'dark azure': '#078BC9',
+};
+
+/** Resolve a brick color to a hex string, with fallback from color name. */
+export function resolveColorHex(part: Part): string {
+  if (part.color_hex) return part.color_hex;
+  const name = (part.color ?? '').toLowerCase().trim();
+  return COLOR_NAME_TO_HEX[name] ?? '#A0A5A9'; // fallback to light bluish gray
+}
+
 // ── Size mapping ─────────────────────────────────────────────────────
 
 /** Parse "Brick 2x4" or "Plate 1x6" style names into [width, height, depth]. */

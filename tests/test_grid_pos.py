@@ -4,7 +4,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.data_pipeline.add_grid_pos import parse_brick_width, compute_grid_positions
+from backend.data_pipeline.add_grid_pos import parse_brick_width, parse_brick_dims, compute_grid_positions
 
 
 # ---------------------------------------------------------------------------
@@ -92,3 +92,30 @@ def test_empty_parts_list():
     layer = {"name": "layer_0", "parts": []}
     result = compute_grid_positions(layer)
     assert result["parts"] == []
+
+
+def test_parse_brick_dims():
+    assert parse_brick_dims("Brick 2x4") == (2, 4)
+    assert parse_brick_dims("Plate 1x6") == (1, 6)
+    assert parse_brick_dims("Something weird") == (2, 2)  # default
+
+
+def test_depth_aware_wrapping():
+    """When bricks wrap to the next row, z advances by the max depth of the
+    completed row — not by 1 — to prevent z-overlap."""
+    layer = {
+        "name": "layer_0",
+        "parts": [
+            {"part_id": "3001", "name": "Brick 2x4", "color": "Red", "quantity": 3},
+            {"part_id": "3002", "name": "Brick 2x2", "color": "Blue", "quantity": 1},
+        ],
+    }
+    result = compute_grid_positions(layer)
+    first_pos = result["parts"][0]["grid_pos"]
+    second_pos = result["parts"][1]["grid_pos"]
+    assert first_pos == [0, 0]
+    # 2x4 bricks: total_width = 2*3 = 6, target_width = max(4, ceil(sqrt(8)*1.2)) = 4
+    # 6 > 4, so first part placed at [0,0], then cursor_x=6
+    # second part: 6+2=8 > 4 and cursor_x>0 => wrap. cursor_z += 4 (depth of first brick)
+    # second part placed at [0, 4]
+    assert second_pos == [0, 4]
