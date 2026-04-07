@@ -203,7 +203,7 @@ def main() -> None:
         save_total_limit=2,
         eval_strategy="steps",
         eval_steps=500,
-        report_to="none",
+        report_to="wandb",
         dataloader_pin_memory=False,
     )
 
