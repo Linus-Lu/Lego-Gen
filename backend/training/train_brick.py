@@ -45,6 +45,10 @@ def main() -> None:
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
+    # Enable gradient checkpointing to reduce VRAM usage (~30% savings)
+    model.gradient_checkpointing_enable()
+    model.enable_input_require_grads()
+
     print("Loading datasets...")
     ds = load_dataset("json", data_files={
         "train": str(train_path),
@@ -57,19 +61,23 @@ def main() -> None:
         output_dir=output_dir,
         num_train_epochs=BRICK_NUM_EPOCHS,
         per_device_train_batch_size=BRICK_BATCH_SIZE,
+        per_device_eval_batch_size=1,  # eval with BS=1 to avoid OOM
         gradient_accumulation_steps=BRICK_GRADIENT_ACCUMULATION,
         learning_rate=BRICK_LEARNING_RATE,
         lr_scheduler_type="cosine",
         warmup_steps=100,
         bf16=True,
+        gradient_checkpointing=True,
         logging_steps=10,
         save_steps=500,
         save_total_limit=2,
         eval_strategy="steps",
         eval_steps=500,
+        eval_on_start=False,
         max_seq_length=BRICK_MAX_SEQ_LENGTH,
         dataset_text_field=None,
         report_to="none",
+        dataloader_pin_memory=False,  # reduce host memory pressure
     )
 
     trainer = SFTTrainer(
