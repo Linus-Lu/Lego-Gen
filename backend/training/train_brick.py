@@ -8,8 +8,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from trl import SFTConfig, SFTTrainer
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+try:
+    from trl import SFTConfig, SFTTrainer
+    HAS_SFT_CONFIG = True
+except ImportError:
+    from trl import SFTTrainer
+    HAS_SFT_CONFIG = False
 
 from backend.config import (
     BRICK_MODEL_NAME, BRICK_CHECKPOINT_DIR, BRICK_LEARNING_RATE,
@@ -57,11 +62,12 @@ def main() -> None:
 
     output_dir = str(BRICK_CHECKPOINT_DIR)
 
-    training_args = SFTConfig(
+    # Build config — handle different TRL versions
+    base_kwargs = dict(
         output_dir=output_dir,
         num_train_epochs=BRICK_NUM_EPOCHS,
         per_device_train_batch_size=BRICK_BATCH_SIZE,
-        per_device_eval_batch_size=1,  # eval with BS=1 to avoid OOM
+        per_device_eval_batch_size=1,
         gradient_accumulation_steps=BRICK_GRADIENT_ACCUMULATION,
         learning_rate=BRICK_LEARNING_RATE,
         lr_scheduler_type="cosine",
@@ -73,18 +79,37 @@ def main() -> None:
         save_total_limit=2,
         eval_strategy="steps",
         eval_steps=500,
-        eval_on_start=False,
-        max_seq_length=BRICK_MAX_SEQ_LENGTH,
-        dataset_text_field=None,
         report_to="none",
-        dataloader_pin_memory=False,  # reduce host memory pressure
+        dataloader_pin_memory=False,
     )
 
-    trainer = SFTTrainer(
-        model=model, args=training_args,
-        train_dataset=ds["train"], eval_dataset=ds["test"],
-        processing_class=tokenizer,
+    if HAS_SFT_CONFIG:
+        # TRL >= 0.12: SFTConfig with max_seq_length
+        try:
+            training_args = SFTConfig(**base_kwargs, max_seq_length=BRICK_MAX_SEQ_LENGTH)
+        except TypeError:
+            # Some TRL versions use different param names
+            training_args = SFTConfig(**base_kwargs)
+    else:
+        training_args = TrainingArguments(**base_kwargs)
+
+    trainer_kwargs = dict(
+        model=model,
+        args=training_args,
+        train_dataset=ds["train"],
+        eval_dataset=ds["test"],
     )
+
+    # max_seq_length may be a SFTTrainer param instead of SFTConfig param
+    try:
+        trainer = SFTTrainer(**trainer_kwargs, processing_class=tokenizer,
+                             max_seq_length=BRICK_MAX_SEQ_LENGTH)
+    except TypeError:
+        try:
+            trainer = SFTTrainer(**trainer_kwargs, tokenizer=tokenizer,
+                                 max_seq_length=BRICK_MAX_SEQ_LENGTH)
+        except TypeError:
+            trainer = SFTTrainer(**trainer_kwargs, tokenizer=tokenizer)
 
     print("Starting training...")
     trainer.train()
