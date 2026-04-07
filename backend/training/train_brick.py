@@ -104,6 +104,8 @@ def main() -> None:
     config_kwargs = dict(base_kwargs)
     if "max_seq_length" in config_params:
         config_kwargs["max_seq_length"] = BRICK_MAX_SEQ_LENGTH
+    elif "max_length" in config_params:
+        config_kwargs["max_length"] = BRICK_MAX_SEQ_LENGTH
     if "dataset_text_field" in config_params:
         config_kwargs["dataset_text_field"] = None
 
