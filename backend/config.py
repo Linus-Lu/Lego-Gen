@@ -81,8 +81,8 @@ UNIFIED_CHECKPOINT_DIR = CHECKPOINT_DIR / "qwen35-9b-lego-stage2-lora"
 UNIFIED_LEARNING_RATE = 5e-5       # higher LR ok for smaller model
 UNIFIED_NUM_EPOCHS = 3
 UNIFIED_WARMUP_STEPS = 200
-UNIFIED_BATCH_SIZE = 4             # fits comfortably on 24GB+ GPU
-UNIFIED_GRADIENT_ACCUMULATION = 8   # effective batch = 32
+UNIFIED_BATCH_SIZE = 8             # 9B 4-bit fits bs=8 on 32GB (5090)
+UNIFIED_GRADIENT_ACCUMULATION = 4   # effective batch = 32
 UNIFIED_MAX_SEQ_LENGTH = 4096
 UNIFIED_QUANTIZATION_BITS = 4      # 4-bit NF4
 VISION_UPSAMPLE = 10  # upsample vision samples to balance with planner data
