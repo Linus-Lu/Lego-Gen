@@ -30,35 +30,40 @@ from backend.config import ST2B_CONVERTED_DIR
 _DIM_RE = re.compile(r"(\d+)\s*x\s*(\d+)", re.IGNORECASE)
 
 _DEFAULT_WIDTH = 2
+_DEFAULT_DEPTH = 2
 
 
-def parse_brick_width(name: str) -> int:
-    """Return the stud width (first dimension) parsed from a part name.
+def parse_brick_dims(name: str) -> tuple[int, int]:
+    """Return (width, depth) in studs parsed from a part name.
 
     Examples
     --------
-    >>> parse_brick_width("Brick 2x2")
-    2
-    >>> parse_brick_width("Plate 1x4")
-    1
-    >>> parse_brick_width("Something weird")
-    2
+    >>> parse_brick_dims("Brick 2x4")
+    (2, 4)
+    >>> parse_brick_dims("Plate 1x6")
+    (1, 6)
+    >>> parse_brick_dims("Something weird")
+    (2, 2)
     """
     m = _DIM_RE.search(name)
     if m:
-        return int(m.group(1))
-    return _DEFAULT_WIDTH
+        return int(m.group(1)), int(m.group(2))
+    return _DEFAULT_WIDTH, _DEFAULT_DEPTH
+
+
+def parse_brick_width(name: str) -> int:
+    """Return the stud width (first dimension) parsed from a part name."""
+    return parse_brick_dims(name)[0]
 
 
 def compute_grid_positions(layer: dict) -> dict:
     """Return a deep copy of *layer* with ``grid_pos`` added to every part.
 
-    The packing algorithm:
-    1. Compute ``total_studs = sum(width * quantity)`` across all parts.
-    2. ``layer_width = max(4, ceil(sqrt(total_studs)))``
-    3. Walk parts left-to-right; for each part:
-       ``grid_pos = [cursor_x % layer_width, cursor_x // layer_width]``
-       then advance ``cursor_x += width * quantity``.
+    The packing algorithm uses row-based placement:
+    1. Compute a target row width from total brick area.
+    2. Place bricks left-to-right; wrap to a new row when the row exceeds
+       the target width, advancing the z-cursor by the tallest depth in
+       the completed row to prevent z-overlap.
 
     The input dict is **not** mutated.
     """
@@ -68,16 +73,31 @@ def compute_grid_positions(layer: dict) -> dict:
     if not parts:
         return result
 
-    # --- compute layer_width ---
-    total_studs = sum(parse_brick_width(p["name"]) * p["quantity"] for p in parts)
-    layer_width = max(4, math.ceil(math.sqrt(total_studs)))
+    # --- compute target row width ---
+    total_area = sum(
+        parse_brick_dims(p["name"])[0] * p["quantity"]
+        for p in parts
+    )
+    target_width = max(4, math.ceil(math.sqrt(total_area) * 1.2))
 
-    # --- assign grid positions ---
+    # --- assign grid positions (row-based, depth-aware) ---
     cursor_x = 0
+    cursor_z = 0
+    row_max_depth = 0
+
     for part in parts:
-        width = parse_brick_width(part["name"])
-        part["grid_pos"] = [cursor_x % layer_width, cursor_x // layer_width]
-        cursor_x += width * part["quantity"]
+        width, depth = parse_brick_dims(part["name"])
+        total_width = width * part["quantity"]
+
+        # Wrap to next row if this part group exceeds target width
+        if cursor_x + total_width > target_width and cursor_x > 0:
+            cursor_z += row_max_depth
+            cursor_x = 0
+            row_max_depth = 0
+
+        part["grid_pos"] = [cursor_x, cursor_z]
+        cursor_x += total_width
+        row_max_depth = max(row_max_depth, depth)
 
     return result
 

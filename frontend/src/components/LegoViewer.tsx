@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
-import BrickMesh, { getBrickSize } from './BrickMesh';
+import BrickMesh, { getBrickSize, resolveColorHex } from './BrickMesh';
 import type { BuildStep } from '../api/legogen';
 
 // ── Props ─────────────────────────────────────────────────────────────
@@ -129,9 +129,9 @@ function packLayer(
 
   // Center the footprint around origin
   if (positions.length > 0) {
-    const minX = Math.min(...positions.map(p => p[0] - bricks[positions.indexOf(p)]?.size[0] / 2 || 0));
+    const minX = Math.min(...positions.map((p, i) => p[0] - bricks[i].size[0] / 2));
     const maxX = Math.max(...positions.map((p, i) => p[0] + bricks[i].size[0] / 2));
-    const minZ = Math.min(...positions.map(p => p[2] - bricks[positions.indexOf(p)]?.size[2] / 2 || 0));
+    const minZ = Math.min(...positions.map((p, i) => p[2] - bricks[i].size[2] / 2));
     const maxZ = Math.max(...positions.map((p, i) => p[2] + bricks[i].size[2] / 2));
     const cx = (minX + maxX) / 2;
     const cz = (minZ + maxZ) / 2;
@@ -160,8 +160,8 @@ function Scene({ steps, currentStep }: LegoViewerProps) {
       // Expand parts with their sizes
       const partsWithSize = step.parts.map(part => ({
         size: getBrickSize(part),
-        color: part.color_hex,
-        isTrans: part.is_trans ?? part.color.toLowerCase().includes('trans'),
+        color: resolveColorHex(part),
+        isTrans: part.is_trans ?? (part.color ?? '').toLowerCase().includes('trans'),
         quantity: part.quantity,
         gridPos: part.grid_pos,
       }));
