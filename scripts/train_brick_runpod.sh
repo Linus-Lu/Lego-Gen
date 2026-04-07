@@ -75,6 +75,10 @@ fi
 
 log "  Installing training libraries..."
 pip install transformers accelerate peft trl datasets bitsandbytes sentencepiece protobuf huggingface_hub 2>&1 | tail -5
+
+log "  Installing flash-linear-attention + causal-conv1d (Qwen3.5 fast path)..."
+pip install causal-conv1d 2>&1 | tail -3
+pip install flash-linear-attention 2>&1 | tail -3
 log "  Done."
 
 # Show installed versions

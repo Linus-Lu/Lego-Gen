@@ -97,6 +97,8 @@ class BrickCurriculumDataset(Dataset):
     def __init__(self, hf_dataset, max_seq_length: int):
         self.hf_dataset = hf_dataset
         self.max_seq_length = max_seq_length
+        # SFTTrainer expects column_names attribute
+        self.column_names = hf_dataset.column_names
 
         # Estimate token count from assistant content length (~3 chars/token)
         # plus prompt overhead (~80 tokens for system + user template)
