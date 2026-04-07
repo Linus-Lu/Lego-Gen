@@ -197,13 +197,18 @@ def main() -> None:
         lr_scheduler_type="cosine",
         warmup_steps=100,
         max_grad_norm=0.5,
+        optim="paged_adamw_8bit",
         bf16=True,
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         logging_steps=10,
         save_steps=200,
         save_total_limit=2,
         eval_strategy="steps",
         eval_steps=200,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
         report_to="wandb",
         dataloader_pin_memory=False,
     )
@@ -232,21 +237,22 @@ def main() -> None:
             outputs = model(**inputs)
             logits = outputs.logits
 
-            # Shift for causal LM: predict next token
-            shift_logits = logits[..., :-1, :].contiguous()
+            # Shift labels for causal LM (predict next token)
             shift_labels = labels[..., 1:].contiguous()
+            seq_len = shift_labels.size(1)
 
             # Apply structure-aware weights
             weights = structure_weights.get_weights(shift_labels).view(-1)
 
-            # Chunked cross-entropy to avoid OOM on 248K vocab
+            # Chunked cross-entropy — slice logits directly to avoid
+            # materializing a full contiguous copy (~2GB for 4095 × 248K)
             CHUNK_SIZE = 256
             loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
-            seq_len = shift_logits.size(1)
             all_losses = []
             for i in range(0, seq_len, CHUNK_SIZE):
-                chunk_logits = shift_logits[:, i:i+CHUNK_SIZE, :].reshape(-1, shift_logits.size(-1))
-                chunk_labels = shift_labels[:, i:i+CHUNK_SIZE].reshape(-1)
+                end = min(i + CHUNK_SIZE, seq_len)
+                chunk_logits = logits[:, i:end, :].reshape(-1, logits.size(-1))
+                chunk_labels = shift_labels[:, i:end].reshape(-1)
                 all_losses.append(loss_fct(chunk_logits, chunk_labels))
             per_token_loss = torch.cat(all_losses)
 
