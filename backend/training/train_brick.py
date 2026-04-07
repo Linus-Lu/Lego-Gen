@@ -12,7 +12,6 @@ import sys
 from pathlib import Path
 
 import torch
-from torch.utils.data import Dataset, Sampler
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -91,79 +90,33 @@ class BrickStructureWeights:
 
 # ── Curriculum dataset & sampler ──────────────────────────────────────────
 
-class BrickCurriculumDataset(Dataset):
-    """Wraps a HF dataset with curriculum ordering: untruncated samples first."""
+def apply_curriculum_ordering(hf_dataset, max_seq_length: int):
+    """Reorder HF dataset: untruncated samples first, then truncated.
 
-    def __init__(self, hf_dataset, max_seq_length: int):
-        self.hf_dataset = hf_dataset
-        self.max_seq_length = max_seq_length
-        # SFTTrainer expects column_names attribute
-        self.column_names = hf_dataset.column_names
+    Returns the reordered dataset and the count of untruncated samples.
+    """
+    PROMPT_OVERHEAD = 80
+    CHARS_PER_TOKEN = 3.0
 
-        # Estimate token count from assistant content length (~3 chars/token)
-        # plus prompt overhead (~80 tokens for system + user template)
-        PROMPT_OVERHEAD = 80
-        CHARS_PER_TOKEN = 3.0
+    fits, truncated = [], []
+    for i in range(len(hf_dataset)):
+        messages = hf_dataset[i]["messages"]
+        assistant_len = len(messages[-1]["content"]) if messages else 0
+        est_tokens = int(assistant_len / CHARS_PER_TOKEN) + PROMPT_OVERHEAD
+        if est_tokens <= max_seq_length:
+            fits.append(i)
+        else:
+            truncated.append(i)
 
-        fits, truncated = [], []
-        for i in range(len(hf_dataset)):
-            messages = hf_dataset[i]["messages"]
-            # Assistant content is the last message
-            assistant_len = len(messages[-1]["content"]) if messages else 0
-            est_tokens = int(assistant_len / CHARS_PER_TOKEN) + PROMPT_OVERHEAD
-            if est_tokens <= max_seq_length:
-                fits.append(i)
-            else:
-                truncated.append(i)
+    # Reorder the HF dataset directly (preserves all HF Dataset methods)
+    ordered_indices = fits + truncated
+    reordered = hf_dataset.select(ordered_indices)
 
-        self.indices = fits + truncated
-        self.n_untruncated = len(fits)
-        self.n_truncated = len(truncated)
+    print(f"  Curriculum: {len(fits)} untruncated, "
+          f"{len(truncated)} truncated ({len(truncated)*100/max(1,len(ordered_indices)):.1f}%) "
+          f"at max_seq_length={max_seq_length}")
 
-        print(f"  Curriculum: {len(fits)} untruncated, "
-              f"{len(truncated)} truncated ({len(truncated)*100/max(1,len(self.indices)):.1f}%) "
-              f"at max_seq_length={max_seq_length}")
-
-    def __len__(self):
-        return len(self.indices)
-
-    def __getitem__(self, idx):
-        return self.hf_dataset[self.indices[idx]]
-
-
-class CurriculumSampler(Sampler):
-    """Samples untruncated indices (shuffled) first, then truncated (shuffled)."""
-
-    def __init__(self, dataset: BrickCurriculumDataset, seed: int = 42):
-        self.n_untruncated = dataset.n_untruncated
-        self.n_total = len(dataset)
-        self.seed = seed
-        self.epoch = 0
-
-    def __len__(self):
-        return self.n_total
-
-    def set_epoch(self, epoch: int):
-        self.epoch = epoch
-
-    def __iter__(self):
-        g = torch.Generator()
-        g.manual_seed(self.seed + self.epoch)
-        untrunc = torch.randperm(self.n_untruncated, generator=g).tolist()
-        trunc = (torch.randperm(self.n_total - self.n_untruncated, generator=g) + self.n_untruncated).tolist()
-        return iter(untrunc + trunc)
-
-
-class EpochCallback(TrainerCallback):
-    """Update curriculum sampler epoch for reshuffling."""
-
-    def __init__(self, sampler):
-        self.sampler = sampler
-
-    def on_epoch_begin(self, args, state, control, **kwargs):
-        epoch = int(state.epoch) if state.epoch else 0
-        self.sampler.set_epoch(epoch)
-        print(f"  Epoch {epoch}: updated curriculum sampler")
+    return reordered, len(fits)
 
 
 class MemoryCleanupCallback(TrainerCallback):
@@ -226,8 +179,7 @@ def main() -> None:
 
     # ── Curriculum ordering ──────────────────────────────────────────
     print("Building curriculum ordering...", flush=True)
-    train_curriculum = BrickCurriculumDataset(ds["train"], BRICK_MAX_SEQ_LENGTH)
-    curriculum_sampler = CurriculumSampler(train_curriculum, seed=42)
+    train_ds, n_untruncated = apply_curriculum_ordering(ds["train"], BRICK_MAX_SEQ_LENGTH)
 
     # ── Structure-aware loss weights ─────────────────────────────────
     structure_weights = BrickStructureWeights(tokenizer)
@@ -272,10 +224,7 @@ def main() -> None:
 
     # ── Build custom trainer with structure-aware loss + curriculum ───
     class BrickTrainer(SFTTrainer):
-        """SFTTrainer with structure-aware loss and curriculum sampling."""
-
-        def _get_train_sampler(self):
-            return curriculum_sampler
+        """SFTTrainer with structure-aware loss and chunked cross-entropy."""
 
         def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
             labels = inputs.pop("labels")
@@ -313,10 +262,9 @@ def main() -> None:
     trainer_kwargs = dict(
         model=model,
         args=training_args,
-        train_dataset=train_curriculum,
+        train_dataset=train_ds,
         eval_dataset=ds["test"],
         callbacks=[
-            EpochCallback(curriculum_sampler),
             MemoryCleanupCallback(),
         ],
     )
