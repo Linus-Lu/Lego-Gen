@@ -9,8 +9,7 @@
 # Usage:
 #   1. Create a RunPod pod with 4x RTX 5090, PyTorch 2.x template
 #   2. SSH in or open terminal
-#   3. Run:  bash <(curl -sL https://raw.githubusercontent.com/Linus-Lu/Lego-Gen/main/scripts/train_brick_runpod.sh)
-#      Or:   git clone https://github.com/Linus-Lu/Lego-Gen.git && cd Lego-Gen && bash scripts/train_brick_runpod.sh
+#   3. Run:  git clone https://github.com/Linus-Lu/Lego-Gen.git && cd Lego-Gen && bash scripts/train_brick_runpod.sh
 ##############################################################################
 
 set -euo pipefail
@@ -36,6 +35,7 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2>/dev/null
 log "CPU: $(nproc) cores"
 log "RAM: $(free -h | awk '/^Mem:/{print $2}')"
 log "Disk: $(df -h / | awk 'NR==2{print $4}') free"
+log "HF_HOME: $HF_HOME"
 echo ""
 
 # ── Clone repo if not already in it ─────────────────────────────────────
@@ -57,11 +57,29 @@ echo ""
 
 # ── Install dependencies ────────────────────────────────────────────────
 log "=== INSTALLING DEPENDENCIES ==="
-log "  Installing Python packages..."
-pip install -q torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 2>/dev/null || true
-pip install -q transformers accelerate peft trl datasets bitsandbytes sentencepiece protobuf 2>&1 | tail -3
-pip install -q huggingface_hub 2>&1 | tail -1
+
+# Detect GPU arch to pick correct PyTorch build
+GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
+log "  Detected GPU: $GPU_NAME"
+
+if echo "$GPU_NAME" | grep -qi "5090\|5080\|5070\|blackwell\|RTX 50"; then
+    log "  Blackwell GPU detected — installing PyTorch nightly with CUDA 12.8 (sm_120 support)"
+    pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 2>&1 | tail -5
+else
+    log "  Installing PyTorch stable with CUDA 12.4"
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 2>&1 | tail -5
+fi
+
+log "  Installing training libraries..."
+pip install transformers accelerate peft trl datasets bitsandbytes sentencepiece protobuf huggingface_hub 2>&1 | tail -5
 log "  Done."
+
+# Show installed versions
+python3 -c "
+import torch, transformers, peft, trl
+print(f'  torch={torch.__version__}  transformers={transformers.__version__}  peft={peft.__version__}  trl={trl.__version__}')
+print(f'  CUDA available: {torch.cuda.is_available()}  CUDA version: {torch.version.cuda}')
+"
 echo ""
 
 # ── Verify GPU access ──────────────────────────────────────────────────
@@ -72,11 +90,12 @@ n = torch.cuda.device_count()
 print(f'  PyTorch sees {n} GPU(s)')
 for i in range(n):
     name = torch.cuda.get_device_name(i)
-    mem = torch.cuda.get_device_properties(i).total_mem / 1e9
+    mem = torch.cuda.get_device_properties(i).total_memory / 1e9
     print(f'    GPU {i}: {name} ({mem:.1f} GB)')
 if n == 0:
     print('  ERROR: No GPUs detected!')
     exit(1)
+print(f'  CUDA arch list: {torch.cuda.get_arch_list()}')
 "
 echo ""
 
@@ -84,14 +103,15 @@ echo ""
 log "=== STEP 1/3: PREPARING TRAINING DATA ==="
 if [ -f "data/brick_training/train.jsonl" ]; then
     train_lines=$(wc -l < data/brick_training/train.jsonl)
-    log "  Training data already exists ($train_lines examples). Skipping."
+    log "  Training data already exists ($train_lines examples). Skipping download."
 else
     log "  Downloading StableText2Brick from HuggingFace..."
     log "  This downloads ~44MB and processes ~47k structures into colored JSONL."
     log "  Expected time: 5-15 minutes."
     echo ""
 
-    python3 -u -m backend.data_pipeline.prepare_brick_dataset 2>&1 | while IFS= read -r line; do
+    # Run with unbuffered output so progress shows in real time
+    PYTHONUNBUFFERED=1 python3 -m backend.data_pipeline.prepare_brick_dataset 2>&1 | while IFS= read -r line; do
         log "  $line"
     done
 
@@ -103,23 +123,47 @@ fi
 
 train_lines=$(wc -l < data/brick_training/train.jsonl)
 test_lines=$(wc -l < data/brick_training/test.jsonl)
-log "  Train: $train_lines examples"
+train_size=$(du -sh data/brick_training/train.jsonl | cut -f1)
+log "  Train: $train_lines examples ($train_size)"
 log "  Test:  $test_lines examples"
+
+# Preview one example
+log "  Sample entry:"
+python3 -c "
+import json
+with open('data/brick_training/train.jsonl') as f:
+    ex = json.loads(f.readline())
+caption = ex['messages'][1]['content'].split('### Input:\n')[1]
+bricks = ex['messages'][2]['content'].split('\n')
+print(f'    Caption: {caption[:80]}')
+print(f'    Bricks:  {len(bricks)} total')
+print(f'    First:   {bricks[0]}')
+print(f'    Last:    {bricks[-1]}')
+"
 echo ""
 
 # ── Step 2: Download base model ────────────────────────────────────────
 log "=== STEP 2/3: DOWNLOADING BASE MODEL ==="
-log "  Model: Qwen/Qwen3.5-4B"
+log "  Model: Qwen/Qwen3.5-4B → $HF_HOME"
 log "  This will download ~8GB on first run."
 
 python3 -c "
+import sys, os
+os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '0'  # show progress
 from transformers import AutoModelForCausalLM, AutoTokenizer
-print('  Downloading tokenizer...')
+from transformers.utils import logging
+logging.set_verbosity_info()
+
+print('  Downloading tokenizer...', flush=True)
 AutoTokenizer.from_pretrained('Qwen/Qwen3.5-4B', trust_remote_code=True)
-print('  Downloading model weights...')
+print('  Tokenizer cached.', flush=True)
+
+print('  Downloading model weights (~8GB)...', flush=True)
 AutoModelForCausalLM.from_pretrained('Qwen/Qwen3.5-4B', torch_dtype='auto', trust_remote_code=True)
-print('  Model cached successfully.')
-"
+print('  Model cached successfully.', flush=True)
+" 2>&1 | grep -v "^$" | while IFS= read -r line; do
+    log "  $line"
+done
 echo ""
 
 # ── Step 3: Train ──────────────────────────────────────────────────────
@@ -128,37 +172,41 @@ log "  Config:"
 log "    Model:       Qwen3.5-4B + LoRA (r=32, alpha=64)"
 log "    Targets:     q_proj, v_proj"
 log "    LR:          2e-3 (cosine schedule)"
-log "    Batch:       4/GPU × 4 accum × 4 GPUs = effective 64"
 log "    Epochs:      3"
 log "    Max seq len: 8192"
 log "    Precision:   bf16"
 log "    Eval:        every 500 steps"
 log "    Save:        every 500 steps (keep last 2)"
+
+NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())")
+EFFECTIVE_BATCH=$((4 * 4 * NUM_GPUS))
+log "    GPUs:        $NUM_GPUS"
+log "    Batch:       4/GPU × 4 accum × $NUM_GPUS GPUs = effective $EFFECTIVE_BATCH"
+
+# Estimate steps
+TRAIN_LINES=$(wc -l < data/brick_training/train.jsonl)
+STEPS_PER_EPOCH=$((TRAIN_LINES / EFFECTIVE_BATCH))
+TOTAL_STEPS=$((STEPS_PER_EPOCH * 3))
+log "    Est. steps:  ~$TOTAL_STEPS total ($STEPS_PER_EPOCH/epoch × 3 epochs)"
 log ""
-log "  Estimated time: 12-16 hours on 4x RTX 5090"
 log "  Training log follows..."
 log "  ─────────────────────────────────────────"
 echo ""
 
 train_start=$(date +%s)
 
-# Use accelerate for multi-GPU if available, else fallback to plain python
-NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())")
-
 if [ "$NUM_GPUS" -gt 1 ]; then
-    log "  Using accelerate with $NUM_GPUS GPUs"
-    pip install -q accelerate 2>/dev/null
+    log "  Launching accelerate with $NUM_GPUS GPUs..."
 
-    accelerate launch \
+    PYTHONUNBUFFERED=1 accelerate launch \
         --num_processes=$NUM_GPUS \
         --mixed_precision=bf16 \
         -m backend.training.train_brick 2>&1 | while IFS= read -r line; do
-        # Add timestamp to every line for monitoring
         echo "[$(date '+%H:%M:%S')] $line"
     done
 else
     log "  Using single GPU"
-    python3 -u -m backend.training.train_brick 2>&1 | while IFS= read -r line; do
+    PYTHONUNBUFFERED=1 python3 -m backend.training.train_brick 2>&1 | while IFS= read -r line; do
         echo "[$(date '+%H:%M:%S')] $line"
     done
 fi
@@ -206,9 +254,10 @@ log "  Checkpoint:      $CKPT_DIR"
 log "============================================"
 log ""
 log "Next steps:"
-log "  1. Download the checkpoint: scp -r runpod:$(pwd)/$CKPT_DIR ./"
+log "  1. Download the checkpoint:"
+log "     scp -r runpod:$(pwd)/$CKPT_DIR ./"
 log "  2. Or push to HuggingFace:"
 log "     python3 -c \"from huggingface_hub import HfApi; HfApi().upload_folder(folder_path='$CKPT_DIR', repo_id='YOUR_USER/qwen35-4b-brick-lora')\""
 log "  3. Place checkpoint in your local repo at $CKPT_DIR"
 log "  4. Start the server: python -m backend.app"
-log "  5. Generate: curl -X POST http://localhost:8000/api/generate-bricks -F 'prompt=a red chair'"
+log "  5. Generate: curl -X POST localhost:8000/api/generate-bricks -F 'prompt=a red chair'"
