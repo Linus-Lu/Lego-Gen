@@ -206,6 +206,8 @@ log "  ────────────────────────�
 echo ""
 
 train_start=$(date +%s)
+TRAIN_LOG="training_brick.log"
+log "  Logging to: $(pwd)/$TRAIN_LOG"
 
 if [ "$NUM_GPUS" -gt 1 ]; then
     log "  Launching accelerate with $NUM_GPUS GPUs..."
@@ -214,12 +216,12 @@ if [ "$NUM_GPUS" -gt 1 ]; then
         --num_processes=$NUM_GPUS \
         --mixed_precision=bf16 \
         -m backend.training.train_brick 2>&1 | while IFS= read -r line; do
-        echo "[$(date '+%H:%M:%S')] $line"
+        echo "[$(date '+%H:%M:%S')] $line" | tee -a "$TRAIN_LOG"
     done
 else
     log "  Using single GPU"
     PYTHONUNBUFFERED=1 python3 -m backend.training.train_brick 2>&1 | while IFS= read -r line; do
-        echo "[$(date '+%H:%M:%S')] $line"
+        echo "[$(date '+%H:%M:%S')] $line" | tee -a "$TRAIN_LOG"
     done
 fi
 
