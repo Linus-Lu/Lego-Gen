@@ -82,18 +82,21 @@ async def generate_bricks(
     prompt: str = Form(default=""),
 ):
     """Generate a brick-coordinate LEGO model from image or text."""
-    from backend.app import get_pipeline
-
-    pipeline = get_pipeline()
-
     if image and image.filename:
         from PIL import Image as PILImage
         import io
+        if image.content_type and not image.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="Uploaded file must be an image")
         contents = await image.read()
-        pil_image = PILImage.open(io.BytesIO(contents)).convert("RGB")
+        try:
+            pil_image = PILImage.open(io.BytesIO(contents)).convert("RGB")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Could not read the uploaded image") from exc
+        pipeline = get_planner_pipeline()
         result = pipeline.generate_brick_build_from_image(pil_image)
-    elif prompt:
-        result = pipeline.generate_brick_build(prompt)
+    elif prompt and prompt.strip():
+        pipeline = get_planner_pipeline()
+        result = pipeline.generate_brick_build(prompt.strip())
     else:
         raise HTTPException(status_code=400, detail="Provide an image or prompt")
 
