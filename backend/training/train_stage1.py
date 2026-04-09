@@ -28,14 +28,20 @@ from pathlib import Path
 
 # ── HuggingFace mirror for China (AutoDL, etc.) ───────────────────────
 # Set before any HF imports so the SDK picks it up immediately.
+# Only probe on rank 0 to avoid 4 parallel socket checks.
 if not os.environ.get("HF_ENDPOINT") and not os.environ.get("HF_HUB_OFFLINE"):
-    # Auto-detect: if huggingface.co is unreachable, use Chinese mirror
-    import socket
-    try:
-        socket.create_connection(("huggingface.co", 443), timeout=3)
-    except OSError:
-        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-        print("[AutoDL] HuggingFace unreachable, using hf-mirror.com")
+    if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+        import socket
+        try:
+            socket.create_connection(("huggingface.co", 443), timeout=3)
+        except OSError:
+            os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+            print("[AutoDL] HuggingFace unreachable, using hf-mirror.com")
+
+# ── Disable W&B on non-main ranks BEFORE any import can trigger init ──
+_local_rank = int(os.environ.get("LOCAL_RANK", -1))
+if _local_rank > 0:
+    os.environ["WANDB_DISABLED"] = "true"
 
 import torch
 from transformers import (
@@ -69,6 +75,23 @@ from backend.config import (
 )
 from backend.data_pipeline.dataset_stage1 import Stage1Collator, Stage1Dataset
 from backend.training.utils import seed_everything, setup_wandb
+
+
+# ── DDP helpers ───────────────────────────────────────────────────────
+
+def _is_torchrun() -> bool:
+    """True when launched via torchrun (LOCAL_RANK env var is set)."""
+    return "LOCAL_RANK" in os.environ
+
+
+def _init_distributed():
+    """Initialize the process group early so we can use barriers during
+    model loading.  No-op if already initialized or not using torchrun."""
+    if not _is_torchrun():
+        return
+    if not torch.distributed.is_initialized():
+        torch.distributed.init_process_group(backend="nccl")
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
 
 # ── Callbacks ─────────────────────────────────────────────────────────
@@ -131,19 +154,15 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_model_and_processor(model_name: str, use_compile: bool = True):
+def load_model_and_processor(model_name: str, local_rank: int, use_compile: bool = True):
     """Load Qwen3.5-9B with 4-bit NF4 quantization and a Stage 1 LoRA adapter.
 
-    Optimizations:
-    - Lower image resolution (128-256 tiles) — sufficient for description task
-    - torch.compile() for 10-20% speedup on Ampere+/Ada/Blackwell
-    - Vision encoder frozen, only LM LoRA layers are trainable
-    - DDP-safe: rank 0 downloads first, others wait for cache
+    DDP-safe: rank 0 downloads first, others wait at a barrier, then all
+    load from the HF cache simultaneously onto their own GPU.
     """
     is_distributed = torch.distributed.is_initialized()
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
-    # ── DDP: serialize downloads — rank 0 goes first, others wait ──────
+    # ── DDP: rank 0 downloads, others wait ─────────────────────────────
     if is_distributed and local_rank != 0:
         torch.distributed.barrier()
 
@@ -158,22 +177,23 @@ def load_model_and_processor(model_name: str, use_compile: bool = True):
     # ── Processor (lower resolution — description task doesn't need 512 tiles)
     processor = AutoProcessor.from_pretrained(
         model_name,
-        min_pixels=128 * 28 * 28,   # was 256*28*28, halved for speed
-        max_pixels=256 * 28 * 28,   # was 512*28*28, halved for speed
+        min_pixels=128 * 28 * 28,
+        max_pixels=256 * 28 * 28,
     )
 
-    # ── Base model ─────────────────────────────────────────────────────
+    # ── Base model — each rank loads onto its own GPU ──────────────────
     from transformers import Qwen3_5ForConditionalGeneration
 
+    target_device = local_rank if is_distributed else 0
     model = Qwen3_5ForConditionalGeneration.from_pretrained(
         model_name,
         quantization_config=bnb_config,
-        device_map={"": local_rank} if is_distributed else "auto",
+        device_map={"": target_device},
         torch_dtype=torch.bfloat16 if USE_BF16 else torch.float16,
     )
     model.enable_input_require_grads()
 
-    # ── DDP: rank 0 done downloading, release other ranks ──────────────
+    # ── DDP: rank 0 done downloading, release others ───────────────────
     if is_distributed and local_rank == 0:
         torch.distributed.barrier()
 
@@ -197,14 +217,17 @@ def load_model_and_processor(model_name: str, use_compile: bool = True):
     if use_compile and hasattr(torch, "compile"):
         try:
             model = torch.compile(model, mode="reduce-overhead")
-            print("  torch.compile() enabled (reduce-overhead mode)")
+            if local_rank <= 0:
+                print("  torch.compile() enabled (reduce-overhead mode)")
         except Exception as e:
-            print(f"  torch.compile() skipped: {e}")
+            if local_rank <= 0:
+                print(f"  torch.compile() skipped: {e}")
 
-    # Report trainable parameters
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in model.parameters())
-    print(f"Trainable: {trainable:,} / {total:,} ({100 * trainable / total:.2f}%)")
+    # Report trainable parameters (rank 0 only)
+    if local_rank <= 0:
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in model.parameters())
+        print(f"Trainable: {trainable:,} / {total:,} ({100 * trainable / total:.2f}%)")
 
     return model, processor
 
@@ -213,18 +236,21 @@ def main():
     args = parse_args()
     seed_everything(args.seed)
 
-    # Detect multi-GPU
-    local_rank = -1
-    world_size = 1
-    if torch.distributed.is_initialized():
-        local_rank = torch.distributed.get_rank()
-        world_size = torch.distributed.get_world_size()
+    # ── Initialize DDP early so barriers work during model loading ──────
+    _init_distributed()
+
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
     is_main = local_rank <= 0
+
+    # Disable W&B on non-main ranks (belt-and-suspenders with top-of-file)
+    if not is_main or args.no_wandb:
+        os.environ["WANDB_DISABLED"] = "true"
 
     if is_main:
         print(f"{'=' * 60}")
-        print(f"  Stage 1 Training: Image → LEGO Description")
-        print(f"  Model: {UNIFIED_MODEL_NAME}")
+        print(f"  Stage 1 Training: Image -> LEGO Description")
+        print(f"  Model: {args.model_path or UNIFIED_MODEL_NAME}")
         print(f"  GPUs: {world_size}")
         print(f"  Per-device batch: {args.batch_size}")
         print(f"  Grad accumulation: {STAGE1_GRADIENT_ACCUMULATION}")
@@ -234,7 +260,7 @@ def main():
         print(f"  LoRA: r={STAGE1_LORA_R}, alpha={STAGE1_LORA_ALPHA}")
         print(f"{'=' * 60}")
 
-    # ── W&B ────────────────────────────────────────────────────────────
+    # ── W&B (rank 0 only) ─────────────────────────────────────────────
     if not args.no_wandb and is_main:
         setup_wandb("legogen-stage1", config={
             **vars(args),
@@ -247,7 +273,9 @@ def main():
     if is_main:
         print(f"Loading {model_name} with 4-bit quantization + Stage 1 LoRA...")
     model, processor = load_model_and_processor(
-        model_name, use_compile=not args.no_compile
+        model_name,
+        local_rank=max(local_rank, 0),
+        use_compile=not args.no_compile,
     )
 
     # ── Dataset ────────────────────────────────────────────────────────
@@ -290,7 +318,7 @@ def main():
         weight_decay=WEIGHT_DECAY,
         bf16=USE_BF16,
         fp16=not USE_BF16 and torch.cuda.is_available(),
-        optim="adamw_torch",  # adamw_torch for Blackwell DDP compatibility
+        optim="adamw_torch",
         logging_steps=LOGGING_STEPS,
         eval_strategy="steps",
         eval_steps=adaptive_save_steps,
