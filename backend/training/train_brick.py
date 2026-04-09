@@ -6,6 +6,7 @@ Features ported from train_unified.py:
   - Chunked cross-entropy (avoids OOM on 248K vocab)
 """
 
+import argparse
 import inspect
 import json
 import sys
@@ -138,6 +139,27 @@ def _inspect_params(cls):
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to checkpoint directory to resume training from. "
+                             "Use 'auto' to resume from latest checkpoint in output_dir.")
+    args = parser.parse_args()
+
+    # Auto-detect latest checkpoint if --resume=auto or not specified
+    if args.resume is None or args.resume == "auto":
+        ckpt_dir = Path(str(BRICK_CHECKPOINT_DIR))
+        if ckpt_dir.exists():
+            checkpoints = sorted(ckpt_dir.glob("checkpoint-*"),
+                                 key=lambda p: int(p.name.split("-")[-1])
+                                 if p.name.split("-")[-1].isdigit() else 0)
+            if checkpoints:
+                args.resume = str(checkpoints[-1])
+                print(f"Auto-resuming from: {args.resume}", flush=True)
+            else:
+                args.resume = None
+        else:
+            args.resume = None
+
     train_path = BRICK_TRAINING_DATA / "train.jsonl"
     test_path = BRICK_TRAINING_DATA / "test.jsonl"
 
@@ -289,7 +311,7 @@ def main() -> None:
     trainer = BrickTrainer(**trainer_kwargs)
 
     print("Starting training...", flush=True)
-    trainer.train()
+    trainer.train(resume_from_checkpoint=args.resume)
     trainer.save_model(output_dir)
     tokenizer.save_pretrained(output_dir)
     print(f"Model saved to {output_dir}", flush=True)
