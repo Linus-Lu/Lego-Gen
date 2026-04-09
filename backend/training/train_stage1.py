@@ -1,24 +1,48 @@
 #!/usr/bin/env python3
-"""Stage 1 training: fine-tune Qwen3.5-27B LoRA on image → description.
+"""Stage 1 training: fine-tune Qwen3.5-9B LoRA on image → description.
 
 Trains a lightweight LoRA adapter on the Stage 1 manifest so the model
 learns to produce concise LEGO-relevant geometry descriptions from photos.
 
+Optimized for multi-GPU (4x RTX 5090) with DDP.
+
 Usage:
+    # Single GPU:
     python -m backend.training.train_stage1
-    python -m backend.training.train_stage1 --manifest data/stage1_manifest.json
-    python -m backend.training.train_stage1 --no-wandb --epochs 1
+
+    # Multi-GPU (4x RTX 5090):
+    torchrun --nproc_per_node=4 -m backend.training.train_stage1
+
+    # With local model path (no internet needed):
+    torchrun --nproc_per_node=4 -m backend.training.train_stage1 --model-path /root/autodl-tmp/models/Qwen3.5-9B
+
+    # AutoDL / China (uses hf-mirror.com automatically):
+    HF_ENDPOINT=https://hf-mirror.com torchrun --nproc_per_node=4 -m backend.training.train_stage1
 """
 
 import argparse
+import gc
+import os
 import sys
 from pathlib import Path
+
+# ── HuggingFace mirror for China (AutoDL, etc.) ───────────────────────
+# Set before any HF imports so the SDK picks it up immediately.
+if not os.environ.get("HF_ENDPOINT") and not os.environ.get("HF_HUB_OFFLINE"):
+    # Auto-detect: if huggingface.co is unreachable, use Chinese mirror
+    import socket
+    try:
+        socket.create_connection(("huggingface.co", 443), timeout=3)
+    except OSError:
+        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+        print("[AutoDL] HuggingFace unreachable, using hf-mirror.com")
 
 import torch
 from transformers import (
     AutoProcessor,
     BitsAndBytesConfig,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
 )
 from peft import LoraConfig, TaskType, get_peft_model
@@ -47,9 +71,37 @@ from backend.data_pipeline.dataset_stage1 import Stage1Collator, Stage1Dataset
 from backend.training.utils import seed_everything, setup_wandb
 
 
+# ── Callbacks ─────────────────────────────────────────────────────────
+
+class MemoryCleanupCallback(TrainerCallback):
+    """Free GPU memory after evaluation to prevent OOM during training."""
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+class ProgressCallback(TrainerCallback):
+    """Log milestone progress every 10%."""
+
+    def __init__(self, total_steps: int):
+        self.total_steps = total_steps
+        self.last_pct = -1
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if self.total_steps <= 0:
+            return
+        pct = int(state.global_step / self.total_steps * 100)
+        if pct % 10 == 0 and pct != self.last_pct:
+            self.last_pct = pct
+            if state.is_local_process_zero:
+                print(f"  [{pct}%] Step {state.global_step}/{self.total_steps}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Stage 1 LoRA training: image → LEGO description"
+        description="Stage 1 LoRA training: image → LEGO description (multi-GPU)"
     )
     parser.add_argument(
         "--manifest",
@@ -65,13 +117,35 @@ def parse_args():
     )
     parser.add_argument("--epochs", type=int, default=STAGE1_NUM_EPOCHS)
     parser.add_argument("--lr", type=float, default=STAGE1_LEARNING_RATE)
+    parser.add_argument("--batch-size", type=int, default=STAGE1_BATCH_SIZE)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-wandb", action="store_true")
+    parser.add_argument(
+        "--no-compile", action="store_true",
+        help="Disable torch.compile (use if hitting issues)",
+    )
+    parser.add_argument(
+        "--model-path", type=str, default=None,
+        help="Local path to pre-downloaded model (skips HF download)",
+    )
     return parser.parse_args()
 
 
-def load_model_and_processor(model_name: str):
-    """Load Qwen3.5-27B with 4-bit NF4 quantization and a Stage 1 LoRA adapter."""
+def load_model_and_processor(model_name: str, use_compile: bool = True):
+    """Load Qwen3.5-9B with 4-bit NF4 quantization and a Stage 1 LoRA adapter.
+
+    Optimizations:
+    - Lower image resolution (128-256 tiles) — sufficient for description task
+    - torch.compile() for 10-20% speedup on Ampere+/Ada/Blackwell
+    - Vision encoder frozen, only LM LoRA layers are trainable
+    - DDP-safe: rank 0 downloads first, others wait for cache
+    """
+    is_distributed = torch.distributed.is_initialized()
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
+    # ── DDP: serialize downloads — rank 0 goes first, others wait ──────
+    if is_distributed and local_rank != 0:
+        torch.distributed.barrier()
 
     # ── 4-bit quantization ─────────────────────────────────────────────
     bnb_config = BitsAndBytesConfig(
@@ -81,24 +155,27 @@ def load_model_and_processor(model_name: str):
         bnb_4bit_use_double_quant=True,
     )
 
-    # ── Processor (handles image + text tokenization) ──────────────────
+    # ── Processor (lower resolution — description task doesn't need 512 tiles)
     processor = AutoProcessor.from_pretrained(
         model_name,
-        min_pixels=256 * 28 * 28,
-        max_pixels=512 * 28 * 28,
+        min_pixels=128 * 28 * 28,   # was 256*28*28, halved for speed
+        max_pixels=256 * 28 * 28,   # was 512*28*28, halved for speed
     )
 
     # ── Base model ─────────────────────────────────────────────────────
-    # Import here to avoid loading torch.nn at module level before cuda check
     from transformers import Qwen3_5ForConditionalGeneration
 
     model = Qwen3_5ForConditionalGeneration.from_pretrained(
         model_name,
         quantization_config=bnb_config,
-        device_map="auto",
+        device_map={"": local_rank} if is_distributed else "auto",
         torch_dtype=torch.bfloat16 if USE_BF16 else torch.float16,
     )
     model.enable_input_require_grads()
+
+    # ── DDP: rank 0 done downloading, release other ranks ──────────────
+    if is_distributed and local_rank == 0:
+        torch.distributed.barrier()
 
     # ── LoRA adapter ───────────────────────────────────────────────────
     lora_config = LoraConfig(
@@ -116,6 +193,14 @@ def load_model_and_processor(model_name: str):
         if "visual" in name or "vision" in name:
             param.requires_grad = False
 
+    # ── torch.compile (10-20% speedup on Ada/Blackwell) ────────────────
+    if use_compile and hasattr(torch, "compile"):
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+            print("  torch.compile() enabled (reduce-overhead mode)")
+        except Exception as e:
+            print(f"  torch.compile() skipped: {e}")
+
     # Report trainable parameters
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
@@ -128,16 +213,46 @@ def main():
     args = parse_args()
     seed_everything(args.seed)
 
+    # Detect multi-GPU
+    local_rank = -1
+    world_size = 1
+    if torch.distributed.is_initialized():
+        local_rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+    is_main = local_rank <= 0
+
+    if is_main:
+        print(f"{'=' * 60}")
+        print(f"  Stage 1 Training: Image → LEGO Description")
+        print(f"  Model: {UNIFIED_MODEL_NAME}")
+        print(f"  GPUs: {world_size}")
+        print(f"  Per-device batch: {args.batch_size}")
+        print(f"  Grad accumulation: {STAGE1_GRADIENT_ACCUMULATION}")
+        print(f"  Effective batch: {args.batch_size * world_size * STAGE1_GRADIENT_ACCUMULATION}")
+        print(f"  Epochs: {args.epochs}")
+        print(f"  LR: {args.lr}")
+        print(f"  LoRA: r={STAGE1_LORA_R}, alpha={STAGE1_LORA_ALPHA}")
+        print(f"{'=' * 60}")
+
     # ── W&B ────────────────────────────────────────────────────────────
-    if not args.no_wandb:
-        setup_wandb("legogen-stage1", config=vars(args))
+    if not args.no_wandb and is_main:
+        setup_wandb("legogen-stage1", config={
+            **vars(args),
+            "world_size": world_size,
+            "effective_batch": args.batch_size * world_size * STAGE1_GRADIENT_ACCUMULATION,
+        })
 
     # ── Model ──────────────────────────────────────────────────────────
-    print(f"Loading {UNIFIED_MODEL_NAME} with 4-bit quantization + Stage 1 LoRA...")
-    model, processor = load_model_and_processor(UNIFIED_MODEL_NAME)
+    model_name = args.model_path or UNIFIED_MODEL_NAME
+    if is_main:
+        print(f"Loading {model_name} with 4-bit quantization + Stage 1 LoRA...")
+    model, processor = load_model_and_processor(
+        model_name, use_compile=not args.no_compile
+    )
 
     # ── Dataset ────────────────────────────────────────────────────────
-    print(f"Loading Stage 1 manifest from {args.manifest} ...")
+    if is_main:
+        print(f"Loading Stage 1 manifest from {args.manifest} ...")
     train_ds = Stage1Dataset(
         manifest_path=args.manifest,
         processor=processor,
@@ -150,18 +265,23 @@ def main():
         max_length=STAGE1_MAX_SEQ_LENGTH,
         split="val",
     )
-    print(f"  Train: {len(train_ds)} samples")
-    print(f"  Val:   {len(val_ds)} samples")
+    if is_main:
+        print(f"  Train: {len(train_ds)} samples")
+        print(f"  Val:   {len(val_ds)} samples")
 
     # ── Training arguments ─────────────────────────────────────────────
-    effective_batch = STAGE1_BATCH_SIZE * STAGE1_GRADIENT_ACCUMULATION
+    effective_batch = args.batch_size * world_size * STAGE1_GRADIENT_ACCUMULATION
     total_steps = (len(train_ds) // effective_batch) * args.epochs
     adaptive_save_steps = max(10, total_steps // 5)
 
+    if is_main:
+        print(f"  Total steps: {total_steps}")
+        print(f"  Save/eval every: {adaptive_save_steps} steps")
+
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        per_device_train_batch_size=STAGE1_BATCH_SIZE,
-        per_device_eval_batch_size=1,
+        per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=max(1, args.batch_size // 2),
         gradient_accumulation_steps=STAGE1_GRADIENT_ACCUMULATION,
         num_train_epochs=args.epochs,
         learning_rate=args.lr,
@@ -170,7 +290,7 @@ def main():
         weight_decay=WEIGHT_DECAY,
         bf16=USE_BF16,
         fp16=not USE_BF16 and torch.cuda.is_available(),
-        optim="paged_adamw_8bit",
+        optim="adamw_torch",  # adamw_torch for Blackwell DDP compatibility
         logging_steps=LOGGING_STEPS,
         eval_strategy="steps",
         eval_steps=adaptive_save_steps,
@@ -180,13 +300,16 @@ def main():
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
-        report_to="wandb" if not args.no_wandb else "none",
+        report_to="wandb" if (not args.no_wandb and is_main) else "none",
         dataloader_num_workers=4,
+        dataloader_pin_memory=True,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         remove_unused_columns=False,
-        # Avoid OOM during eval — only compute loss, not full logits
         prediction_loss_only=True,
+        # Multi-GPU: DDP settings
+        ddp_find_unused_parameters=False,
+        ddp_bucket_cap_mb=50,
     )
 
     # ── Trainer ────────────────────────────────────────────────────────
@@ -196,26 +319,33 @@ def main():
         train_dataset=train_ds,
         eval_dataset=val_ds,
         data_collator=Stage1Collator(),
+        callbacks=[
+            MemoryCleanupCallback(),
+            ProgressCallback(total_steps),
+        ],
     )
 
     # ── Train ──────────────────────────────────────────────────────────
-    print("Starting Stage 1 training...")
+    if is_main:
+        print("Starting Stage 1 training...")
     trainer.train()
 
     # ── Save adapter ───────────────────────────────────────────────────
-    output_path = Path(args.output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    print(f"\nSaving Stage 1 adapter to {output_path} ...")
-    model.save_pretrained(str(output_path))
-    processor.save_pretrained(str(output_path))
-    print("Done.")
+    if is_main:
+        output_path = Path(args.output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        print(f"\nSaving Stage 1 adapter to {output_path} ...")
+        model.save_pretrained(str(output_path))
+        processor.save_pretrained(str(output_path))
+        print("Done.")
 
     # ── Final evaluation ───────────────────────────────────────────────
-    print("Running final evaluation...")
-    metrics = trainer.evaluate()
-    print("\nFinal Metrics:")
-    for k, v in sorted(metrics.items()):
-        print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
+    if is_main:
+        print("Running final evaluation...")
+        metrics = trainer.evaluate()
+        print("\nFinal Metrics:")
+        for k, v in sorted(metrics.items()):
+            print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
 
 
 if __name__ == "__main__":

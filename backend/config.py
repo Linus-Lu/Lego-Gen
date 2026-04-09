@@ -94,8 +94,8 @@ STAGE1_LORA_ALPHA = 64
 STAGE1_LEARNING_RATE = 5e-5
 STAGE1_NUM_EPOCHS = 3
 STAGE1_WARMUP_STEPS = 100
-STAGE1_BATCH_SIZE = 4
-STAGE1_GRADIENT_ACCUMULATION = 4  # effective batch = 16
+STAGE1_BATCH_SIZE = 8             # 9B 4-bit + r=32 LoRA fits bs=8 on 32GB (5090)
+STAGE1_GRADIENT_ACCUMULATION = 1  # effective batch = 8 * N_GPUS (32 on 4x 5090)
 STAGE1_MAX_SEQ_LENGTH = 512       # descriptions are short
 
 # ── Stage 2: Brick coordinate model ────────────────────────────────────
