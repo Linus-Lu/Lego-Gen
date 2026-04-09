@@ -47,6 +47,7 @@ class LegoUnifiedModel:
         self,
         model_name: str = UNIFIED_MODEL_NAME,
         load_adapter: str | None = None,
+        is_trainable: bool = True,
     ):
         self.model_name = model_name
 
@@ -83,17 +84,23 @@ class LegoUnifiedModel:
             model_name, **load_kwargs,
         )
 
-        # ── Enable input gradients for gradient checkpointing compat ──
-        self.model.enable_input_require_grads()
+        # ── Enable input gradients only for training (QLoRA + gradient checkpointing compat)
+        # At inference time this wastes VRAM by allocating gradient tensors.
+        if is_trainable:
+            self.model.enable_input_require_grads()
 
         # ── Apply LoRA or load existing adapter ────────────────────────
         if load_adapter:
-            self.model = PeftModel.from_pretrained(self.model, load_adapter, is_trainable=True)
+            self.model = PeftModel.from_pretrained(self.model, load_adapter, is_trainable=is_trainable)
         else:
             self._apply_lora()
 
         # ── Freeze vision encoder and any LoRA params on vision layers ─
         self._freeze_vision()
+
+        # ── Ensure eval mode for inference when not training ───────────
+        if not is_trainable:
+            self.model.eval()
 
     def _apply_lora(self):
         """Apply LoRA adapters to language model layers."""

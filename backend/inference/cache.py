@@ -5,7 +5,6 @@ Layer 2 - ResponseCache:  LRU + TTL cache for complete inference results.
 Layer 3 - TokenizationCache: Cached chat-template strings for static prompts.
 """
 
-import copy
 import hashlib
 import threading
 import time
@@ -88,21 +87,65 @@ class KVPrefixCache:
             f"planner={self._planner_prefix_len} tokens"
         )
 
+    def warmup_stage1(self, model, processor, system_prompt: str):
+        """Warm up a KV prefix for the Stage 1 system prompt."""
+        import torch
+
+        device = next(model.parameters()).device
+        messages = [{"role": "system", "content": system_prompt}]
+        text = processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=False,
+        )
+        inputs = processor(text=[text], return_tensors="pt").to(device)
+
+        with torch.inference_mode():
+            out = model(**inputs, use_cache=True)
+        self._stage1_cache = out.past_key_values
+        self._stage1_prefix_len = inputs["input_ids"].shape[1]
+        print(f"[cache] Stage 1 KV prefix warmup: {self._stage1_prefix_len} tokens")
+
+    def get_stage1_prefix(self):
+        """Return (cloned DynamicCache, prefix_length) for Stage 1 path."""
+        cache = getattr(self, "_stage1_cache", None)
+        if cache is None:
+            return None, 0
+        prefix_len = getattr(self, "_stage1_prefix_len", 0)
+        return self._clone_kv_cache(cache), prefix_len
+
     @property
     def is_ready(self) -> bool:
         return self._warmed_up
+
+    @staticmethod
+    def _clone_kv_cache(cache):
+        """Clone a DynamicCache using tensor .clone() instead of copy.deepcopy.
+
+        copy.deepcopy on GPU tensors is very slow because it copies Python
+        metadata + pickles/unpickles. Tensor .clone() stays on GPU and is
+        ~10-50x faster for the ~48-layer KV cache of a 9B model.
+        """
+        from transformers.cache_utils import DynamicCache
+
+        cloned = DynamicCache()
+        for layer_idx in range(len(cache)):
+            cloned.update(
+                cache.key_cache[layer_idx].clone(),
+                cache.value_cache[layer_idx].clone(),
+                layer_idx,
+            )
+        return cloned
 
     def get_vision_prefix(self):
         """Return (cloned DynamicCache, prefix_length) for vision path."""
         if not self._warmed_up:
             return None, 0
-        return copy.deepcopy(self._vision_cache), self._vision_prefix_len
+        return self._clone_kv_cache(self._vision_cache), self._vision_prefix_len
 
     def get_planner_prefix(self):
         """Return (cloned DynamicCache, prefix_length) for planner path."""
         if not self._warmed_up:
             return None, 0
-        return copy.deepcopy(self._planner_cache), self._planner_prefix_len
+        return self._clone_kv_cache(self._planner_cache), self._planner_prefix_len
 
 
 # ── Layer 2: Response Caching ─────────────────────────────────────────

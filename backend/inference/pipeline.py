@@ -20,10 +20,57 @@ from backend.config import (
     CACHE_ENABLED,
     CACHE_KV_PREFIX_ENABLED,
     CACHE_RESPONSE_ENABLED,
+    CACHE_RESPONSE_FOR_SAMPLING,
     CACHE_TOKENIZATION_ENABLED,
     CACHE_RESPONSE_MAX_SIZE,
     CACHE_RESPONSE_TTL_SECONDS,
 )
+
+# Response caching is only effective when results are deterministic.
+# With do_sample=True and temperature>0, skip response cache unless explicitly opted in.
+_RESPONSE_CACHE_ACTIVE = CACHE_RESPONSE_ENABLED and (
+    TEMPERATURE == 0 or not TOP_P or CACHE_RESPONSE_FOR_SAMPLING
+)
+
+
+# ── Singletons for validation ────────────────────────────────────────
+
+_stability_checker = None
+
+
+def _get_stability_checker():
+    """Get or create a singleton StabilityChecker (avoid re-instantiation per request)."""
+    global _stability_checker
+    if _stability_checker is None:
+        from backend.inference.stability_checker import StabilityChecker
+        _stability_checker = StabilityChecker()
+    return _stability_checker
+
+
+def _parse_and_validate_output(raw_output: str) -> tuple[dict | None, bool, list[str]]:
+    """Parse model output into validated LEGO JSON.
+
+    Uses validate_and_repair_dict when JSON is already parsed to avoid
+    the redundant dict -> json.dumps -> json.loads round-trip.
+
+    Returns (description_or_None, is_valid, errors).
+    """
+    from backend.models.tokenizer import extract_json_from_text
+    from backend.inference.constraint_engine import safe_parse_and_validate, validate_and_repair_dict
+
+    parsed = extract_json_from_text(raw_output)
+    if parsed:
+        # Already a dict — validate directly without serializing back to JSON
+        repaired, errors = validate_and_repair_dict(parsed)
+        is_valid = len(errors) == 0
+        return repaired, is_valid, errors
+
+    # Output likely truncated — use full repair pipeline (parse from string)
+    description, errors = safe_parse_and_validate(raw_output)
+    is_valid = description is not None
+    if is_valid:
+        errors = [e for e in errors if "Missing field" not in e]
+    return description, is_valid, errors
 
 
 # ── Singletons ────────────────────────────────────────────────────────
@@ -58,7 +105,6 @@ class MockPipeline:
 
     def generate_build(self, image=None, cache_key=None) -> dict:
         from backend.inference.postprocess_manual import json_to_steps
-        from backend.inference.stability_checker import StabilityChecker
         from dataclasses import asdict
 
         description = {
@@ -132,7 +178,7 @@ class MockPipeline:
         }
 
         steps = json_to_steps(description)
-        validation = asdict(StabilityChecker().validate(description))
+        validation = asdict(_get_stability_checker().validate(description))
 
         return {
             "description": description,
@@ -179,17 +225,12 @@ class LegoGenPipeline:
     ) -> dict:
         """Generate a structured JSON description from a LEGO image."""
         import torch
-        import json
-        from backend.models.tokenizer import build_chat_messages, extract_json_from_text
-        from backend.inference.constraint_engine import safe_parse_and_validate
+        from backend.models.tokenizer import build_chat_messages
 
         start = time.time()
 
         with torch.inference_mode():
-            # Build chat messages for Qwen3-VL
             messages = build_chat_messages()
-
-            # Apply chat template
             text = self.processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
@@ -208,23 +249,12 @@ class LegoGenPipeline:
                 do_sample=True,
             )
 
-            # Decode only the generated tokens (skip the input)
             generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
             raw_output = self.processor.tokenizer.decode(
                 generated_ids, skip_special_tokens=True
             )
 
-        # Parse and validate — handle truncated output from token limit
-        parsed = extract_json_from_text(raw_output)
-        if parsed:
-            reparsed, errors = safe_parse_and_validate(json.dumps(parsed))
-            description = reparsed or parsed
-            is_valid = reparsed is not None and len(errors) == 0
-        else:
-            description, errors = safe_parse_and_validate(raw_output)
-            is_valid = description is not None
-            if is_valid:
-                errors = [e for e in errors if "Missing field" not in e]
+        description, is_valid, errors = _parse_and_validate_output(raw_output)
 
         elapsed_ms = int((time.time() - start) * 1000)
 
@@ -241,12 +271,11 @@ class LegoGenPipeline:
         result = self.describe_image(image)
 
         from backend.inference.postprocess_manual import json_to_steps
-        from backend.inference.stability_checker import StabilityChecker
         from dataclasses import asdict
 
         description = result["description"]
         steps = json_to_steps(description) if description else []
-        validation = asdict(StabilityChecker().validate(description))
+        validation = asdict(_get_stability_checker().validate(description))
 
         return {
             "description": description,
@@ -293,9 +322,7 @@ class PlannerPipeline:
     ) -> dict:
         """Generate a structured JSON description from a text prompt."""
         import torch
-        import json
-        from backend.models.tokenizer import build_planner_chat_messages, extract_json_from_text, strip_thinking_blocks
-        from backend.inference.constraint_engine import safe_parse_and_validate
+        from backend.models.tokenizer import build_planner_chat_messages, strip_thinking_blocks
 
         start = time.time()
 
@@ -325,22 +352,8 @@ class PlannerPipeline:
                 generated_ids, skip_special_tokens=True
             )
 
-        # Strip any thinking blocks and parse
         raw_output = strip_thinking_blocks(raw_output)
-
-        # Try exact JSON extraction first, fall back to truncation-aware repair
-        parsed = extract_json_from_text(raw_output)
-        if parsed:
-            reparsed, errors = safe_parse_and_validate(json.dumps(parsed))
-            description = reparsed or parsed
-            is_valid = reparsed is not None and len(errors) == 0
-        else:
-            # Output likely truncated by token limit — repair and validate
-            description, errors = safe_parse_and_validate(raw_output)
-            is_valid = description is not None
-            if is_valid:
-                # Truncated but repaired — note it but don't treat as failure
-                errors = [e for e in errors if "Missing field" not in e]
+        description, is_valid, errors = _parse_and_validate_output(raw_output)
 
         elapsed_ms = int((time.time() - start) * 1000)
 
@@ -357,12 +370,11 @@ class PlannerPipeline:
         result = self.describe_from_text(prompt)
 
         from backend.inference.postprocess_manual import json_to_steps
-        from backend.inference.stability_checker import StabilityChecker
         from dataclasses import asdict
 
         description = result["description"]
         steps = json_to_steps(description) if description else []
-        validation = asdict(StabilityChecker().validate(description))
+        validation = asdict(_get_stability_checker().validate(description))
 
         return {
             "description": description,
@@ -411,6 +423,7 @@ class UnifiedPipeline:
         self.wrapper = LegoUnifiedModel(
             model_name=model_name,
             load_adapter=load_adapter,
+            is_trainable=False,
         )
         self.model = self.wrapper.get_model()
         self.processor = self.wrapper.get_processor()
@@ -428,6 +441,17 @@ class UnifiedPipeline:
 
         # Initialize caching layers
         self._init_caches()
+
+        # Warm up Stage 1 KV prefix if two-stage is available
+        if self.has_stage1 and CACHE_ENABLED and CACHE_KV_PREFIX_ENABLED:
+            try:
+                from backend.config import STAGE1_SYSTEM_PROMPT
+                self.wrapper.set_adapter("stage1")
+                self.kv_cache.warmup_stage1(self.model, self.processor, STAGE1_SYSTEM_PROMPT)
+                self.wrapper.set_adapter("default")
+            except Exception as e:
+                print(f"[cache] Stage 1 KV prefix warmup failed (non-fatal): {e}")
+                self.wrapper.set_adapter("default")
 
     def _init_caches(self):
         """Initialize and warm up all cache layers."""
@@ -499,12 +523,10 @@ class UnifiedPipeline:
     ) -> dict:
         """Generate a structured JSON description from a LEGO image."""
         import torch
-        import json
-        from backend.models.tokenizer import build_chat_messages, extract_json_from_text, strip_thinking_blocks
-        from backend.inference.constraint_engine import safe_parse_and_validate
+        from backend.models.tokenizer import build_chat_messages, strip_thinking_blocks
 
         # Layer 2: Check response cache
-        if CACHE_ENABLED and CACHE_RESPONSE_ENABLED and cache_key:
+        if CACHE_ENABLED and _RESPONSE_CACHE_ACTIVE and cache_key:
             cached = self.response_cache.get(cache_key)
             if cached is not None:
                 return {**cached, "generation_time_ms": 0, "cached": True}
@@ -592,17 +614,7 @@ class UnifiedPipeline:
             )
 
         raw_output = strip_thinking_blocks(raw_output)
-
-        parsed = extract_json_from_text(raw_output)
-        if parsed:
-            reparsed, errors = safe_parse_and_validate(json.dumps(parsed))
-            description = reparsed or parsed
-            is_valid = reparsed is not None and len(errors) == 0
-        else:
-            description, errors = safe_parse_and_validate(raw_output)
-            is_valid = description is not None
-            if is_valid:
-                errors = [e for e in errors if "Missing field" not in e]
+        description, is_valid, errors = _parse_and_validate_output(raw_output)
 
         elapsed_ms = int((time.time() - start) * 1000)
 
@@ -616,7 +628,7 @@ class UnifiedPipeline:
         }
 
         # Layer 2: Store in response cache
-        if CACHE_ENABLED and CACHE_RESPONSE_ENABLED and cache_key:
+        if CACHE_ENABLED and _RESPONSE_CACHE_ACTIVE and cache_key:
             self.response_cache.put(cache_key, result)
 
         return result
@@ -628,12 +640,10 @@ class UnifiedPipeline:
     ) -> dict:
         """Generate a structured JSON description from a text prompt."""
         import torch
-        import json
-        from backend.models.tokenizer import build_planner_chat_messages, extract_json_from_text, strip_thinking_blocks
-        from backend.inference.constraint_engine import safe_parse_and_validate
+        from backend.models.tokenizer import build_planner_chat_messages, strip_thinking_blocks
 
         # Layer 2: Check response cache
-        if CACHE_ENABLED and CACHE_RESPONSE_ENABLED:
+        if CACHE_ENABLED and _RESPONSE_CACHE_ACTIVE:
             from backend.inference.cache import ResponseCache
             rkey = ResponseCache.make_key_text(prompt)
             cached = self.response_cache.get(rkey)
@@ -702,17 +712,7 @@ class UnifiedPipeline:
             )
 
         raw_output = strip_thinking_blocks(raw_output)
-
-        parsed = extract_json_from_text(raw_output)
-        if parsed:
-            reparsed, errors = safe_parse_and_validate(json.dumps(parsed))
-            description = reparsed or parsed
-            is_valid = reparsed is not None and len(errors) == 0
-        else:
-            description, errors = safe_parse_and_validate(raw_output)
-            is_valid = description is not None
-            if is_valid:
-                errors = [e for e in errors if "Missing field" not in e]
+        description, is_valid, errors = _parse_and_validate_output(raw_output)
 
         elapsed_ms = int((time.time() - start) * 1000)
 
@@ -726,19 +726,26 @@ class UnifiedPipeline:
         }
 
         # Layer 2: Store in response cache
-        if CACHE_ENABLED and CACHE_RESPONSE_ENABLED and rkey:
+        if CACHE_ENABLED and _RESPONSE_CACHE_ACTIVE and rkey:
             self.response_cache.put(rkey, result)
 
         return result
 
     def describe_image_stage1(self, image) -> str:
-        """Stage 1: Generate a structural description from an image."""
+        """Stage 1: Generate a structural description from an image.
+
+        Uses KV prefix cache for the Stage 1 system prompt when available.
+        """
         import torch
         from backend.config import STAGE1_SYSTEM_PROMPT
         from backend.models.tokenizer import strip_thinking_blocks
 
         if self.has_stage1:
+            t_swap = time.time()
             self.wrapper.set_adapter("stage1")
+            swap_ms = int((time.time() - t_swap) * 1000)
+            if swap_ms > 5:
+                print(f"[perf] adapter swap to stage1 took {swap_ms}ms")
 
         with torch.inference_mode():
             messages = [
@@ -761,18 +768,61 @@ class UnifiedPipeline:
                 text=[text], images=[image], return_tensors="pt",
             ).to(self.model.device)
 
-            outputs = self.model.generate(
-                **inputs, max_new_tokens=256, temperature=0.7,
+            generate_kwargs = dict(
+                max_new_tokens=256, temperature=0.7,
                 top_p=0.9, do_sample=True,
             )
-            generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
+
+            # Use KV prefix cache for Stage 1 system prompt
+            if (
+                CACHE_ENABLED
+                and CACHE_KV_PREFIX_ENABLED
+                and self.kv_cache.is_ready
+            ):
+                kv_clone, prefix_len = self.kv_cache.get_stage1_prefix()
+                if kv_clone is not None and inputs["input_ids"].shape[1] > prefix_len:
+                    new_input_ids = inputs["input_ids"][:, prefix_len:]
+                    full_len = inputs["input_ids"].shape[1]
+                    attention_mask = torch.ones(
+                        (1, full_len), dtype=torch.long, device=self.model.device
+                    )
+                    position_ids = torch.arange(
+                        prefix_len, full_len, dtype=torch.long, device=self.model.device
+                    ).unsqueeze(0)
+
+                    generate_kwargs["past_key_values"] = kv_clone
+                    generate_kwargs["attention_mask"] = attention_mask
+
+                    extra_keys = {}
+                    for k in ("pixel_values", "image_grid_thw"):
+                        if k in inputs:
+                            extra_keys[k] = inputs[k]
+
+                    outputs = self.model.generate(
+                        input_ids=new_input_ids,
+                        position_ids=position_ids,
+                        **extra_keys,
+                        **generate_kwargs,
+                    )
+                    generated_ids = outputs[0][new_input_ids.shape[1]:]
+                else:
+                    outputs = self.model.generate(**inputs, **generate_kwargs)
+                    generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
+            else:
+                outputs = self.model.generate(**inputs, **generate_kwargs)
+                generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
+
             raw = self.processor.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
         raw = strip_thinking_blocks(raw)
 
         # Switch back to Stage 2 adapter
         if self.has_stage1:
+            t_swap = time.time()
             self.wrapper.set_adapter("default")
+            swap_ms = int((time.time() - t_swap) * 1000)
+            if swap_ms > 5:
+                print(f"[perf] adapter swap to default took {swap_ms}ms")
 
         return raw.strip()
 
@@ -780,25 +830,30 @@ class UnifiedPipeline:
         """Full pipeline: image -> description -> build steps.
 
         If Stage 1 adapter is loaded, uses two-stage pipeline:
-          Stage 1: image -> text description
+          Stage 1: image -> text description (cached by image hash)
           Stage 2: text description -> LEGO JSON
         Otherwise falls back to single-stage image -> JSON.
         """
         if self.has_stage1:
+            # Check response cache for the full two-stage result
+            if CACHE_ENABLED and _RESPONSE_CACHE_ACTIVE and cache_key:
+                cached = self.response_cache.get(f"twostage:{cache_key}")
+                if cached is not None:
+                    return {**cached, "metadata": {**cached.get("metadata", {}), "generation_time_ms": 0, "cached": True}}
+
             description_text = self.describe_image_stage1(image)
             result = self.describe_from_text(description_text)
         else:
             result = self.describe_image(image, cache_key=cache_key)
 
         from backend.inference.postprocess_manual import json_to_steps
-        from backend.inference.stability_checker import StabilityChecker
         from dataclasses import asdict
 
         description = result["description"]
         steps = json_to_steps(description) if description else []
-        validation = asdict(StabilityChecker().validate(description))
+        validation = asdict(_get_stability_checker().validate(description))
 
-        return {
+        build_result = {
             "description": description,
             "steps": steps,
             "metadata": {
@@ -811,17 +866,22 @@ class UnifiedPipeline:
             "validation": validation,
         }
 
+        # Cache two-stage result by image hash
+        if self.has_stage1 and CACHE_ENABLED and CACHE_RESPONSE_ENABLED and cache_key:
+            self.response_cache.put(f"twostage:{cache_key}", build_result)
+
+        return build_result
+
     def generate_build_from_text(self, prompt: str) -> dict:
         """Full pipeline: text prompt -> description -> build steps."""
         result = self.describe_from_text(prompt)
 
         from backend.inference.postprocess_manual import json_to_steps
-        from backend.inference.stability_checker import StabilityChecker
         from dataclasses import asdict
 
         description = result["description"]
         steps = json_to_steps(description) if description else []
-        validation = asdict(StabilityChecker().validate(description))
+        validation = asdict(_get_stability_checker().validate(description))
 
         return {
             "description": description,

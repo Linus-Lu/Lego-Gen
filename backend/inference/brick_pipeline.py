@@ -42,18 +42,32 @@ class BrickPipeline:
     """
 
     def __init__(self, device: str = "cuda") -> None:
+        from transformers import BitsAndBytesConfig
+
         self.device = device
         self.tokenizer = AutoTokenizer.from_pretrained(
             BRICK_MODEL_NAME, trust_remote_code=True
         )
+
+        # Use 4-bit quantization to reduce VRAM (~2GB instead of ~8GB for bf16)
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
         base = AutoModelForCausalLM.from_pretrained(
-            BRICK_MODEL_NAME, torch_dtype=torch.bfloat16, trust_remote_code=True
+            BRICK_MODEL_NAME,
+            quantization_config=bnb_config,
+            device_map="auto",
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
         )
         ckpt = Path(BRICK_CHECKPOINT_DIR)
         self.model = (
             PeftModel.from_pretrained(base, str(ckpt)) if ckpt.exists() else base
         )
-        self.model.to(device).eval()
+        self.model.eval()
 
     def generate(self, caption: str) -> dict:
         """Generate a brick structure for *caption*.
@@ -77,6 +91,9 @@ class BrickPipeline:
         )
 
         bricks: list[Brick] = []
+        # Track the token length of each brick for efficient rollback
+        brick_token_lengths: list[int] = []
+        base_input_len = input_ids.shape[1]
         grid = VoxelGrid()
         total_rejections = 0
         total_rollbacks = 0
@@ -92,6 +109,7 @@ class BrickPipeline:
                 brick_ids = self.tokenizer.encode(
                     serialize_brick(brick) + "\n", add_special_tokens=False
                 )
+                brick_token_lengths.append(len(brick_ids))
                 input_ids = torch.cat(
                     [input_ids, torch.tensor([brick_ids], device=self.device)], dim=1
                 )
@@ -102,14 +120,17 @@ class BrickPipeline:
             idx = find_first_unstable(bricks)
             if idx <= 0:
                 break
+
+            # Rollback by slicing input_ids instead of re-tokenizing
             bricks = bricks[:idx]
+            truncated_token_lengths = brick_token_lengths[:idx]
+            brick_token_lengths = truncated_token_lengths
+            tokens_to_keep = base_input_len + sum(truncated_token_lengths)
+            input_ids = input_ids[:, :tokens_to_keep]
+
             grid.clear()
             for b in bricks:
                 grid.place(b)
-            brick_text = "\n".join(serialize_brick(b) for b in bricks) + "\n"
-            input_ids = self.tokenizer.encode(
-                input_text + brick_text, return_tensors="pt"
-            ).to(self.device)
             total_rollbacks += 1
 
         return {

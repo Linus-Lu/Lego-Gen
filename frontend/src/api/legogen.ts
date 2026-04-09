@@ -190,6 +190,69 @@ export interface GalleryBuild {
 
 const API_BASE = import.meta.env.VITE_API_URL ?? '';
 
+// ── SSE Streaming API ──────────────────────────────────────────────
+
+export interface StreamProgress {
+  stage: 'stage1' | 'stage2' | 'validating';
+  message: string;
+}
+
+export async function generateBuildStream(
+  onProgress: (progress: StreamProgress) => void,
+  image?: File,
+  prompt?: string,
+): Promise<GenerateResponse> {
+  const form = new FormData();
+  if (image) form.append("image", image);
+  if (prompt) form.append("prompt", prompt);
+
+  const res = await fetch(`${API_BASE}/api/generate-stream`, {
+    method: "POST",
+    body: form,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Request failed" }));
+    throw new Error(err.detail ?? `HTTP ${res.status}`);
+  }
+
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error("No response body");
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let result: GenerateResponse | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+
+    let eventType = '';
+    for (const line of lines) {
+      if (line.startsWith('event: ')) {
+        eventType = line.slice(7).trim();
+      } else if (line.startsWith('data: ') && eventType) {
+        const data = JSON.parse(line.slice(6));
+        if (eventType === 'progress') {
+          onProgress(data as StreamProgress);
+        } else if (eventType === 'result') {
+          result = data as GenerateResponse;
+        } else if (eventType === 'error') {
+          throw new Error(data.detail ?? 'Generation failed');
+        }
+        eventType = '';
+      }
+    }
+  }
+
+  if (!result) throw new Error('No result received from stream');
+  return result;
+}
+
 export async function generateBuild(
   image: File,
   prompt?: string

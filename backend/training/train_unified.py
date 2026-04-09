@@ -72,12 +72,12 @@ class StructureAwareWeights:
         self.structure_weight = structure_weight
 
         # Collect token IDs for JSON syntax characters
-        self.boilerplate_ids: set[int] = set()
+        boilerplate_ids: set[int] = set()
         for char in ["{", "}", "[", "]", ":", ",", '{"', '"}', '["', '"]',
                      '":', '",', "},", "],", "  ", "    ", "\n", "\n  ",
                      "\n    ", "\n      ", "\n        "]:
             ids = tokenizer.encode(char, add_special_tokens=False)
-            self.boilerplate_ids.update(ids)
+            boilerplate_ids.update(ids)
 
         # Also add common JSON field keys that repeat in every sample
         for key in ['"part_id"', '"name"', '"category"', '"color"',
@@ -89,32 +89,48 @@ class StructureAwareWeights:
                     '"width"', '"height"', '"depth"',
                     ': "', ': {', ': [', ': true', ': false']:
             ids = tokenizer.encode(key, add_special_tokens=False)
-            self.boilerplate_ids.update(ids)
+            boilerplate_ids.update(ids)
 
         # Structural keywords — the decisions that matter most
-        self.structure_ids: set[int] = set()
+        structure_ids: set[int] = set()
         for word in ["layer_0", "layer_1", "layer_2", "layer_3", "layer_4",
                      "layer_5", "layer_6", "layer_7", "layer_8", "layer_9",
                      "bottom", "center", "top", "left", "right",
                      "connects_to", "position", "orientation",
                      "flat", "upright", "angled", "inverted"]:
             ids = tokenizer.encode(word, add_special_tokens=False)
-            self.structure_ids.update(ids)
+            structure_ids.update(ids)
 
         # Remove any overlap (structure wins over boilerplate)
-        self.boilerplate_ids -= self.structure_ids
+        boilerplate_ids -= structure_ids
 
-        print(f"[StructureAwareWeights] boilerplate token IDs: {len(self.boilerplate_ids)}, "
-              f"structure token IDs: {len(self.structure_ids)}")
+        # Pre-compute sorted tensors for torch.isin() — O(1) per call instead of O(n*m)
+        self.boilerplate_tensor = torch.tensor(sorted(boilerplate_ids), dtype=torch.long)
+        self.structure_tensor = torch.tensor(sorted(structure_ids), dtype=torch.long)
+
+        print(f"[StructureAwareWeights] boilerplate token IDs: {len(boilerplate_ids)}, "
+              f"structure token IDs: {len(structure_ids)}")
 
     def get_weights(self, labels: torch.Tensor) -> torch.Tensor:
-        """Return per-token weights. Shape matches labels."""
+        """Return per-token weights. Shape matches labels.
+
+        Uses torch.isin() with pre-computed lookup tensors instead of
+        iterating over each token ID. This is O(seq_len * log(n)) instead
+        of O(seq_len * n_ids) per batch.
+        """
         weights = torch.ones_like(labels, dtype=torch.float32)
 
-        for tid in self.boilerplate_ids:
-            weights[labels == tid] = self.boilerplate_weight
-        for tid in self.structure_ids:
-            weights[labels == tid] = self.structure_weight
+        # Move lookup tensors to labels device (cached after first call)
+        if self.boilerplate_tensor.device != labels.device:
+            self.boilerplate_tensor = self.boilerplate_tensor.to(labels.device)
+            self.structure_tensor = self.structure_tensor.to(labels.device)
+
+        # Vectorized membership tests
+        is_boilerplate = torch.isin(labels, self.boilerplate_tensor)
+        is_structure = torch.isin(labels, self.structure_tensor)
+
+        weights[is_boilerplate] = self.boilerplate_weight
+        weights[is_structure] = self.structure_weight
 
         # Masked tokens (-100) get weight 0
         weights[labels == -100] = 0.0

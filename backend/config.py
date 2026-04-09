@@ -140,16 +140,19 @@ COCO_TO_ST2B_CATEGORY = {
 # ── Prompt Caching ────────────────────────────────────────────────────
 CACHE_ENABLED = os.environ.get("LEGOGEN_CACHE_ENABLED", "1") == "1"
 CACHE_KV_PREFIX_ENABLED = True       # Layer 1: KV-cache prefix reuse
-CACHE_RESPONSE_ENABLED = True        # Layer 2: Full response caching (note: do_sample=True means same prompt can produce different outputs; first result is cached)
+CACHE_RESPONSE_ENABLED = True        # Layer 2: Full response caching
+CACHE_RESPONSE_FOR_SAMPLING = False  # When False (default), skip Layer 2 cache when do_sample=True
+                                     # Set True to cache first result even with sampling (returns same output for repeat prompts)
 CACHE_TOKENIZATION_ENABLED = True    # Layer 3: Tokenization caching
 CACHE_RESPONSE_MAX_SIZE = 256        # Max cached responses
 CACHE_RESPONSE_TTL_SECONDS = 3600    # 1 hour TTL
 
 # ── Inference ──────────────────────────────────────────────────────────
-MAX_NEW_TOKENS = 1024
+MAX_NEW_TOKENS = 2048          # increased from 1024 to reduce truncation of complex builds
 NUM_BEAMS = 1
 TEMPERATURE = 0.7
 TOP_P = 0.9
+INFERENCE_TIMEOUT_SECONDS = 120  # max time for a single inference request
 
 # ── Stability Checker Thresholds ──────────────────────────────────────
 QUANTITY_WARN_THRESHOLD = 50

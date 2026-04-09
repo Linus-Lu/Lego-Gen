@@ -177,6 +177,20 @@ def validate_structural_order(data: dict) -> list[str]:
     return warnings
 
 
+def validate_and_repair_dict(data: dict) -> tuple[dict, list[str]]:
+    """Validate and repair an already-parsed dict (no JSON parsing needed).
+
+    Use this when you already have a parsed dict from extract_json_from_text()
+    to avoid the redundant dict -> json.dumps -> json.loads round-trip.
+
+    Returns (repaired_dict, errors).
+    """
+    is_valid, errors = validate_lego_json(data)
+    data = enforce_valid_values(data)
+    data = repair_connects_to(data)
+    return data, errors
+
+
 def safe_parse_and_validate(raw: str) -> tuple[dict | None, list[str]]:
     """Full pipeline: repair -> parse -> validate -> enforce valid values.
 
@@ -193,13 +207,7 @@ def safe_parse_and_validate(raw: str) -> tuple[dict | None, list[str]]:
         except json.JSONDecodeError:
             return None, ["Failed to parse JSON even after repair"]
 
-    # Step 3: Validate
-    is_valid, errors = validate_lego_json(data)
-
-    # Step 4: Enforce valid values (fix what we can)
-    data = enforce_valid_values(data)
-
-    # Step 5: Repair connects_to references
-    data = repair_connects_to(data)
+    # Step 3-5: Validate and repair
+    data, errors = validate_and_repair_dict(data)
 
     return data, errors

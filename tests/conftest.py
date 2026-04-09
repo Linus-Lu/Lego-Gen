@@ -1,5 +1,4 @@
 import pytest
-import torch
 
 
 def pytest_configure(config):
@@ -7,7 +6,13 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(config, items):
-    if not torch.cuda.is_available():
+    try:
+        import torch
+        has_cuda = torch.cuda.is_available()
+    except ImportError:
+        has_cuda = False
+
+    if not has_cuda:
         skip_gpu = pytest.mark.skip(reason="No CUDA GPU available")
         for item in items:
             if "gpu" in item.keywords:

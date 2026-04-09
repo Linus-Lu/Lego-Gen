@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Header from '../components/Header';
 import UploadPanel from '../components/UploadPanel';
@@ -7,8 +7,8 @@ import StepDetail from '../components/StepDetail';
 import ColorLegend from '../components/ColorLegend';
 import LegoViewer from '../components/LegoViewer';
 import ValidationPanel from '../components/ValidationPanel';
-import { generateBuild, generateBuildFromText, createGalleryBuild } from '../api/legogen';
-import type { GenerateResponse } from '../api/legogen';
+import { generateBuild, generateBuildFromText, generateBuildStream, createGalleryBuild } from '../api/legogen';
+import type { GenerateResponse, StreamProgress } from '../api/legogen';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -34,6 +34,7 @@ const BuildSession: React.FC = () => {
     }
   ]);
   const [isLoading, setIsLoading] = useState(false);
+  const [loadingStage, setLoadingStage] = useState<string>('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const [buildResult, setBuildResult] = useState<GenerateResponse | null>(null);
@@ -44,9 +45,16 @@ const BuildSession: React.FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
+  // Only scroll when messages change, not on buildResult tab/step changes
   useEffect(() => {
     scrollToBottom();
-  }, [messages, buildResult]);
+  }, [messages]);
+
+  // Memoize the flattened parts list to avoid re-creating on every render
+  const allParts = useMemo(
+    () => buildResult?.steps.flatMap((s) => s.parts) ?? [],
+    [buildResult?.steps],
+  );
 
   const handleSendMessage = async () => {
     if ((!input.trim() && !selectedFile) || isLoading) return;
@@ -76,10 +84,24 @@ const BuildSession: React.FC = () => {
 
     try {
       let result: GenerateResponse;
-      if (fileToSend) {
-        result = await generateBuild(fileToSend, textToSend || undefined);
-      } else {
-        result = await generateBuildFromText(textToSend);
+      const handleProgress = (progress: StreamProgress) => {
+        setLoadingStage(progress.message);
+      };
+
+      // Try streaming endpoint first, fall back to non-streaming
+      try {
+        result = await generateBuildStream(
+          handleProgress,
+          fileToSend || undefined,
+          textToSend || undefined,
+        );
+      } catch {
+        // Fall back to non-streaming API
+        if (fileToSend) {
+          result = await generateBuild(fileToSend, textToSend || undefined);
+        } else {
+          result = await generateBuildFromText(textToSend);
+        }
       }
       setBuildResult(result);
       setSaved(false);
@@ -163,6 +185,7 @@ const BuildSession: React.FC = () => {
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
+      setLoadingStage('');
     }
   };
 
@@ -273,7 +296,7 @@ const BuildSession: React.FC = () => {
                         </div>
                         <ColorLegend
                           dominantColors={buildResult.description.dominant_colors ?? []}
-                          allParts={buildResult.steps.flatMap((s) => s.parts)}
+                          allParts={allParts}
                         />
                       </div>
                     ) : (
@@ -342,7 +365,7 @@ const BuildSession: React.FC = () => {
                   <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" />
                   <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }} />
                   <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }} />
-                  <span className="text-xs text-gray-500 ml-2">Analyzing and generating instructions...</span>
+                  <span className="text-xs text-gray-500 ml-2">{loadingStage || 'Analyzing and generating instructions...'}</span>
                 </div>
               </div>
             </div>
