@@ -165,8 +165,8 @@ class Stage1Collator:
     def __call__(self, features: list[dict]) -> dict:
         batch = {}
 
-        # Standard sequence tensors
-        for key in ("input_ids", "attention_mask", "labels"):
+        # Standard sequence tensors (mm_token_type_ids required by Qwen3.5 M-RoPE)
+        for key in ("input_ids", "attention_mask", "labels", "mm_token_type_ids"):
             if key in features[0]:
                 batch[key] = torch.stack([f[key] for f in features])
 
