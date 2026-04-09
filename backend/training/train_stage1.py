@@ -144,17 +144,13 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument(
-        "--no-compile", action="store_true",
-        help="Disable torch.compile (use if hitting issues)",
-    )
-    parser.add_argument(
         "--model-path", type=str, default=None,
         help="Local path to pre-downloaded model (skips HF download)",
     )
     return parser.parse_args()
 
 
-def load_model_and_processor(model_name: str, local_rank: int, use_compile: bool = True):
+def load_model_and_processor(model_name: str, local_rank: int):
     """Load Qwen3.5-9B with 4-bit NF4 quantization and a Stage 1 LoRA adapter.
 
     DDP-safe: rank 0 downloads first, others wait at a barrier, then all
@@ -213,15 +209,8 @@ def load_model_and_processor(model_name: str, local_rank: int, use_compile: bool
         if "visual" in name or "vision" in name:
             param.requires_grad = False
 
-    # ── torch.compile (10-20% speedup on Ada/Blackwell) ────────────────
-    if use_compile and hasattr(torch, "compile"):
-        try:
-            model = torch.compile(model, mode="reduce-overhead")
-            if local_rank <= 0:
-                print("  torch.compile() enabled (reduce-overhead mode)")
-        except Exception as e:
-            if local_rank <= 0:
-                print(f"  torch.compile() skipped: {e}")
+    # NOTE: torch.compile() is incompatible with quantized model training
+    # (HF Trainer rejects it). Only useful at inference time.
 
     # Report trainable parameters (rank 0 only)
     if local_rank <= 0:
@@ -275,7 +264,6 @@ def main():
     model, processor = load_model_and_processor(
         model_name,
         local_rank=max(local_rank, 0),
-        use_compile=not args.no_compile,
     )
 
     # ── Dataset ────────────────────────────────────────────────────────
