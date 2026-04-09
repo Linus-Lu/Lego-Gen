@@ -6,6 +6,7 @@ Features ported from train_unified.py:
   - Chunked cross-entropy (avoids OOM on 248K vocab)
 """
 
+import argparse
 import inspect
 import json
 import sys
@@ -138,6 +139,11 @@ def _inspect_params(cls):
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to checkpoint directory to resume training from")
+    args = parser.parse_args()
+
     train_path = BRICK_TRAINING_DATA / "train.jsonl"
     test_path = BRICK_TRAINING_DATA / "test.jsonl"
 
@@ -289,7 +295,7 @@ def main() -> None:
     trainer = BrickTrainer(**trainer_kwargs)
 
     print("Starting training...", flush=True)
-    trainer.train()
+    trainer.train(resume_from_checkpoint=args.resume)
     trainer.save_model(output_dir)
     tokenizer.save_pretrained(output_dir)
     print(f"Model saved to {output_dir}", flush=True)
