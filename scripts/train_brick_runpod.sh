@@ -81,7 +81,7 @@ else
 fi
 
 log "  Installing training libraries..."
-pip install transformers accelerate peft trl datasets bitsandbytes sentencepiece protobuf huggingface_hub wandb 2>&1 | tail -5
+pip install --index-url https://pypi.org/simple transformers accelerate peft trl datasets bitsandbytes sentencepiece protobuf huggingface_hub wandb 2>&1 | tail -5
 
 log "  Done."
 
