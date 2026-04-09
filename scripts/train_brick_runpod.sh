@@ -71,7 +71,8 @@ log "  Detected GPU: $GPU_NAME"
 
 if echo "$GPU_NAME" | grep -qi "5090\|5080\|5070\|blackwell\|RTX 50"; then
     log "  Blackwell GPU detected — installing PyTorch nightly with CUDA 12.8 (sm_120 support)"
-    pip install --no-cache-dir --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 2>&1 | tail -5
+    pip cache purge 2>/dev/null || true
+    pip install --no-cache-dir --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 2>&1 | tail -10
 else
     log "  Installing PyTorch stable with CUDA 12.4"
     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 2>&1 | tail -5
