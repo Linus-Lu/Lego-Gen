@@ -219,7 +219,7 @@ def main() -> None:
         lr_scheduler_type="cosine",
         warmup_steps=100,
         max_grad_norm=0.5,
-        optim="paged_adamw_8bit",
+        optim="adamw_torch",
         bf16=True,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
