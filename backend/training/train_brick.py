@@ -76,13 +76,18 @@ class BrickStructureWeights:
               f"structure token IDs: {len(self.structure_ids)}")
 
     def get_weights(self, labels: torch.Tensor) -> torch.Tensor:
-        """Return per-token weights. Shape matches labels."""
+        """Return per-token weights. Shape matches labels. Vectorized."""
         weights = torch.ones_like(labels, dtype=torch.float32)
 
-        for tid in self.boilerplate_ids:
-            weights[labels == tid] = self.boilerplate_weight
-        for tid in self.structure_ids:
-            weights[labels == tid] = self.structure_weight
+        if self.boilerplate_ids:
+            bp_ids = torch.tensor(list(self.boilerplate_ids), device=labels.device)
+            bp_mask = (labels.unsqueeze(-1) == bp_ids).any(-1)
+            weights[bp_mask] = self.boilerplate_weight
+
+        if self.structure_ids:
+            st_ids = torch.tensor(list(self.structure_ids), device=labels.device)
+            st_mask = (labels.unsqueeze(-1) == st_ids).any(-1)
+            weights[st_mask] = self.structure_weight
 
         # Masked tokens (-100) get weight 0
         weights[labels == -100] = 0.0
@@ -232,7 +237,8 @@ def main() -> None:
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         report_to="wandb",
-        dataloader_pin_memory=False,
+        dataloader_pin_memory=True,
+        dataloader_num_workers=4,
     )
 
     # Decide which config class to use
@@ -266,17 +272,11 @@ def main() -> None:
             # Apply structure-aware weights
             weights = structure_weights.get_weights(shift_labels).view(-1)
 
-            # Chunked cross-entropy — slice logits directly to avoid
-            # materializing a full contiguous copy (~2GB for 4095 × 248K)
-            CHUNK_SIZE = 256
+            # Cross-entropy loss — single vectorized call
+            shift_logits = logits[:, :seq_len, :].contiguous().view(-1, logits.size(-1))
+            flat_labels = shift_labels.view(-1)
             loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
-            all_losses = []
-            for i in range(0, seq_len, CHUNK_SIZE):
-                end = min(i + CHUNK_SIZE, seq_len)
-                chunk_logits = logits[:, i:end, :].reshape(-1, logits.size(-1))
-                chunk_labels = shift_labels[:, i:end].reshape(-1)
-                all_losses.append(loss_fct(chunk_logits, chunk_labels))
-            per_token_loss = torch.cat(all_losses)
+            per_token_loss = loss_fct(shift_logits, flat_labels)
 
             weighted_loss = (per_token_loss * weights).sum() / weights.sum().clamp(min=1.0)
 
