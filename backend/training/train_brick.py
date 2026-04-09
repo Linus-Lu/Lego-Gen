@@ -233,6 +233,7 @@ def main() -> None:
         greater_is_better=False,
         report_to="wandb",
         dataloader_pin_memory=False,
+        ddp_find_unused_parameters=False,
     )
 
     # Decide which config class to use

@@ -83,6 +83,11 @@ fi
 log "  Installing training libraries..."
 pip install transformers accelerate peft trl datasets bitsandbytes sentencepiece protobuf huggingface_hub wandb 2>&1 | tail -5
 
+# Remove pre-installed CUDA extensions that may be incompatible with Blackwell GPUs
+# MinkowskiEngine/spconv are NOT needed for LLM training and cause "invalid argument" errors
+log "  Removing incompatible CUDA extensions (if any)..."
+pip uninstall -y MinkowskiEngine spconv spconv-cu120 spconv-cu118 2>/dev/null || true
+
 log "  Done."
 
 # Show installed versions
