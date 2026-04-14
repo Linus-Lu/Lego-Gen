@@ -259,18 +259,20 @@ def evaluate_stage2(pred: dict, ref: dict, known_part_ids: set | None = None) ->
 def evaluate_stability(pred: dict) -> dict:
     """Run stability checker and return score + per-check results."""
     try:
-        from backend.inference.stability_checker import StabilityChecker
-        checker = StabilityChecker()
-        report = checker.check(pred)
-        return {
-            "stability_score": report.get("score", 0),
-            "stability_checks_passed": sum(
-                1 for c in report.get("checks", []) if c.get("status") == "pass"
-            ),
-            "stability_checks_total": len(report.get("checks", [])),
-        }
+        from backend.brick.stability import is_stable
+        from backend.brick.parser import parse_brick_sequence
+        bricks_text = pred.get("bricks", "")
+        if bricks_text:
+            bricks = parse_brick_sequence(bricks_text)
+            stable = is_stable(bricks)
+            return {
+                "stability_score": 100 if stable else 0,
+                "stability_checks_passed": 1 if stable else 0,
+                "stability_checks_total": 1,
+            }
+        return {"stability_score": 0, "stability_checks_passed": 0, "stability_checks_total": 1}
     except Exception:
-        return {"stability_score": 0, "stability_checks_passed": 0, "stability_checks_total": 10}
+        return {"stability_score": 0, "stability_checks_passed": 0, "stability_checks_total": 1}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -523,11 +525,11 @@ def main():
                 if dims:
                     desc_text += f"Size: {dims.get('width', 'medium')} width, {dims.get('height', 'medium')} height."
 
-                result = pipeline.generate_build_from_text(desc_text)
+                result = pipeline.generate_brick_build(desc_text)
             else:
                 from PIL import Image as PILImage
                 image = PILImage.open(sample["image_path"]).convert("RGB")
-                result = pipeline.generate_build(image)
+                result = pipeline.generate_brick_build_from_image(image)
 
             latency = (time.time() - t0) * 1000
             pred = result.get("description", {})

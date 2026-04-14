@@ -1,130 +1,113 @@
 # LEGOGen
 
-AI-powered LEGO set generator that creates step-by-step building instructions from images or text prompts. Upload a photo of any object or describe what you want to build, and LEGOGen designs a complete LEGO model with real part IDs, color assignments, subassembly-level spatial relationships, and an interactive 3D build viewer.
+AI-powered LEGO model generator using a two-phase pipeline. Upload a photo or describe what you want to build, and LEGOGen generates a 3D LEGO model with precise brick coordinates, colors, and an interactive viewer.
 
 ## Architecture
 
 ```
 Image / Text Prompt
        |
-  FastAPI Backend
+  Two-Phase Pipeline
        |
-  +----+----+
-  |         |
-  V2        V3
-  Vision    Planner
-  Encoder   LM
-  (Qwen3    (Qwen3.5
-   -VL-8B)   -9B)
-  |         |
-  +----+----+
-       |
-  Structured JSON Description
-       |
-  Constraint Engine (validate + repair)
-       |
-  Build Step Generator
-       |
-  React Frontend + Three.js 3D Viewer
+  +---------+---------+
+  |                   |
+  Stage 1             |
+  Image -> Text       |
+  (Qwen 7B VL)        |
+  |                   |
+  +----> Text Description
+              |
+         Stage 2
+         Text -> Brick Coordinates
+         (Qwen 4B)
+              |
+         Brick Sequence with
+         Rejection Sampling +
+         Physics Rollback
+              |
+         React Frontend +
+         Three.js 3D Viewer
 ```
 
-### Two Model Pipeline
+### Two-Phase Pipeline
 
-| Model | Task | Base | Training Data |
-|-------|------|------|---------------|
-| **V2 Vision Encoder** | Image -> JSON | Qwen3-VL-8B-Instruct | 1.9k Rebrickable sets with images |
-| **V3 Planner LM** | Text -> JSON | Qwen3.5-9B | 1.9k Rebrickable (3x upsampled) + 41k StableText2Brick |
+| Stage | Task | Model | Output |
+|-------|------|-------|--------|
+| **Stage 1** | Image -> Text Description | Qwen 7B VL + LoRA | Concise structural description |
+| **Stage 2** | Text -> Brick Coordinates | Qwen 4B + LoRA | `HxW (x,y,z) #RRGGBB` per brick |
 
-Both models are fine-tuned with **QLoRA** (4-bit NF4 quantization). Vision encoder uses LoRA rank 32/alpha 64 on attention + MLP layers. Planner uses LoRA rank 64/alpha 128 with `all-linear` targeting for Qwen3.5's hybrid DeltaNet/Attention architecture.
+- **Stage 1** takes an image and produces a concise text description of the object's shape, structure, colors, and proportions. The vision encoder is frozen; only the language model layers are fine-tuned with a lightweight LoRA adapter (rank 32, alpha 64).
 
-## Features
+- **Stage 2** takes the text description and generates a sequence of brick placements with exact coordinates and colors. Uses rejection sampling (invalid bricks are discarded and regenerated) and physics rollback (unstable structures are truncated and rebuilt).
 
-- **Image-to-Build**: Upload any image (photo, drawing, existing LEGO set) and get a full LEGO build plan
-- **Text-to-Build**: Describe what you want ("Build me a red sports car") and get a complete parts list and instructions
-- **Interactive 3D Viewer**: Step-by-step build visualization with color-coded bricks, orbit controls, and transparency support (schematic layout — not exact brick geometry)
-- **Real Part IDs**: Uses actual LEGO part numbers from the Rebrickable catalog
-- **JSON Validation & Repair**: Constraint engine validates model outputs against a strict schema and auto-repairs common issues
-- **Diverse Prompt Training**: 17 prompt templates with color-aware variants for robust text understanding
-- **Curriculum Learning**: Prompt rotation per epoch for training diversity
+Both stages use **QLoRA** (4-bit NF4 quantization) for efficient fine-tuning on consumer GPUs.
 
-## Output Schema
+## Brick Output Format
 
-The models produce structured JSON with:
+Each brick is a single line:
 
-```json
-{
-  "set_id": "custom-001",
-  "object": "Cozy Family House",
-  "category": "City",
-  "subcategory": "Residential",
-  "complexity": "intermediate",
-  "total_parts": 86,
-  "dominant_colors": ["Red", "White", "Bright Orange"],
-  "dimensions_estimate": {"width": "medium", "height": "medium", "depth": "small"},
-  "subassemblies": [
-    {
-      "name": "base_plate",
-      "type": "Baseplates",
-      "parts": [
-        {"part_id": "3811", "name": "Baseplate 32x32", "color": "Green", "color_hex": "#237841", "quantity": 1}
-      ],
-      "spatial": {"position": "bottom", "orientation": "flat", "connects_to": ["walls_lower"]}
-    }
-  ],
-  "build_hints": ["Start with the green base plate", "Build walls before attaching the roof"]
-}
 ```
+2x4 (5,3,0) #C91A09
+1x2 (7,3,1) #FFFFFF
+2x4 (5,3,1) #0055BF
+```
+
+Format: `<height>x<width> (<x>,<y>,<z>) #<hex_color>`
+
+Allowed dimensions: `1x1, 1x2, 2x1, 1x4, 4x1, 1x6, 6x1, 1x8, 8x1, 2x2, 2x4, 4x2, 2x6, 6x2`
+
+All bricks are 1 unit tall. Grid is 20x20x20.
 
 ## Project Structure
 
 ```
 backend/
   api/
-    routes_generate.py       # POST /api/generate (image), /api/generate-from-text
-    routes_validate.py       # POST /api/validate (build stability/legality check)
+    routes_generate.py       # POST /api/generate-bricks (image or text)
   models/
-    vision_encoder.py        # Qwen3-VL + QLoRA wrapper
-    planner_lm.py            # Qwen3.5-9B + QLoRA wrapper
-    tokenizer.py             # Prompt templates, JSON parsing, chat message builders
+    unified_model.py         # Qwen VL model wrapper (Stage 1 + adapter swapping)
+    tokenizer.py             # Prompt templates, JSON parsing
   inference/
-    pipeline.py              # LegoGenPipeline (image) + PlannerPipeline (text) + MockPipeline (dev)
-    constraint_engine.py     # Schema validation, JSON repair, value enforcement
-    stability_checker.py     # Build stability/legality checker (10 checks, 0-100 scoring)
-    postprocess_manual.py    # Convert JSON descriptions to ordered build steps
+    pipeline.py              # TwoStagePipeline + MockPipeline
+    brick_pipeline.py        # Stage 2: text -> brick coordinates (Qwen 4B)
+  brick/
+    constants.py             # Brick shapes, grid size, color palette
+    parser.py                # Parse/serialize brick text format
+    decoder.py               # Constrained decoding state machine
+    occupancy.py             # Voxel grid collision detection
+    stability.py             # Physics stability checks
   data_pipeline/
-    dataset.py               # Vision dataset (image-JSON pairs with augmentation)
-    dataset_planner.py       # Planner dataset (text-JSON pairs, Rebrickable + ST2B)
-    part_library.py          # Rebrickable part/color/category cache
-    manuals_loader.py        # Rebrickable API data fetcher
-    manuals_preprocess.py    # Raw API data -> structured JSON labels
+    dataset_stage1.py        # Stage 1 dataset (image-description pairs)
+    build_stage1_dataset.py  # Build Stage 1 manifest from COCO + ST2B
+    prepare_brick_dataset.py # Build Stage 2 training data from ST2B
+    dataset.py               # Image augmentation transforms
   training/
-    train_vision.py          # V2 vision model training script
-    train_planner.py         # V3 planner model training script
-    utils.py                 # Metrics (JSON validity, field accuracy, color F1, parts F1)
+    train_stage1.py          # Stage 1 training (multi-GPU DDP)
+    train_brick.py           # Stage 2 training (structure-aware loss)
+    utils.py                 # Metrics, seeding, W&B logging
   config.py                  # All configuration: models, paths, hyperparameters
-  app.py                     # FastAPI app with CORS, lifespan, static file serving
+  app.py                     # FastAPI app with CORS and lifespan
 
 frontend/
   src/
     pages/
-      Home.tsx               # Landing page with hero and feature cards
-      BuildSession.tsx       # Main build interface (upload/prompt -> steps -> 3D viewer)
-      About.tsx              # Tech stack and project info
+      Home.tsx               # Landing page
+      BuildSession.tsx       # Main build interface (upload/prompt -> 3D viewer)
+      About.tsx              # Tech stack info
     components/
       UploadPanel.tsx        # Drag-and-drop image upload
       PromptInput.tsx        # Text prompt input
-      StepList.tsx           # Step navigation sidebar
-      StepDetail.tsx         # Current step parts and instructions
-      LegoViewer.tsx         # Three.js 3D progressive build viewer
-      ValidationPanel.tsx    # Build stability/legality validation results
-      ColorLegend.tsx        # Color key display
+      BrickCoordViewer.tsx   # Three.js 3D brick viewer
+      BrickMesh.tsx          # Individual brick 3D mesh
     api/
-      legogen.ts             # API client (generateBuild, generateBuildFromText)
+      legogen.ts             # API client (generateBricks)
 
 scripts/
   prepare_dataset.py         # Download Rebrickable CSVs, build labels, fetch images
-  convert_st2b.py            # Convert HuggingFace StableText2Brick to our schema
-  prepare_planner_prompts.py # Generate diverse prompt variants per label
+  bootstrap.sh               # Environment setup
+  train_full_pipeline.sh     # Full training orchestration
+  train_brick_runpod.sh      # RunPod training script
+  benchmark.py               # Evaluation benchmark
 ```
 
 ## Setup
@@ -148,25 +131,26 @@ cd frontend && npm install
 # 1. Download Rebrickable data and images
 python scripts/prepare_dataset.py --max-sets 2000
 
-# 2. Convert StableText2Brick dataset (for planner training)
-python scripts/convert_st2b.py --split train
-python scripts/convert_st2b.py --split test
+# 2. Build Stage 1 manifest (COCO + ST2B image-description pairs)
+python -m backend.data_pipeline.build_stage1_dataset
 
-# 3. Generate prompt variants for planner training
-python scripts/prepare_planner_prompts.py
+# 3. Build Stage 2 brick training data from StableText2Brick
+python -m backend.data_pipeline.prepare_brick_dataset
 ```
 
 ### Train Models
 
 ```bash
-# V2: Image-to-JSON (Qwen3-VL + QLoRA)
-python -m backend.training.train_vision --epochs 3 --batch-size 2
+# Stage 1: Image -> Text Description (Qwen VL 7B + LoRA)
+# Single GPU:
+python -m backend.training.train_stage1
 
-# V3: Text-to-JSON (Qwen3.5-9B + QLoRA)
-python -m backend.training.train_planner --epochs 5 --batch-size 2
+# Multi-GPU (4x GPUs):
+torchrun --nproc_per_node=4 -m backend.training.train_stage1
+
+# Stage 2: Text -> Brick Coordinates (Qwen 4B + LoRA)
+python -m backend.training.train_brick
 ```
-
-Both scripts support `--resume <checkpoint-path>` to continue from a saved checkpoint and `--no-wandb` to disable W&B logging.
 
 ### Run the App
 
@@ -183,65 +167,63 @@ cd frontend && npm run dev
 
 ## Training Details
 
-### V2 Vision Encoder
+### Stage 1: Image -> Text (Qwen 7B VL)
 
 | Param | Value |
 |-------|-------|
-| Base model | Qwen3-VL-8B-Instruct |
+| Base model | Qwen VL 7B |
 | LoRA rank / alpha | 32 / 64 |
-| Learning rate | 1e-4 (cosine schedule) |
-| Batch size | 2 (grad accum 16, effective 32) |
+| LoRA targets | all-linear (vision encoder frozen) |
+| Learning rate | 5e-5 (cosine schedule) |
+| Batch size | 8 per device |
 | Epochs | 3 |
-| Warmup | 200 steps |
+| Warmup | 100 steps |
 | Quantization | 4-bit NF4 |
-| Vision encoder | Frozen |
+| Max sequence length | 512 tokens |
 
-### V3 Planner LM
+### Stage 2: Text -> Brick Coordinates (Qwen 4B)
 
 | Param | Value |
 |-------|-------|
-| Base model | Qwen3.5-9B |
-| LoRA rank / alpha | 64 / 128 |
-| LoRA targets | all-linear (hybrid DeltaNet/Attention) |
-| Learning rate | 3e-5 (cosine schedule) |
-| Batch size | 2 (grad accum 8, effective 16) |
-| Epochs | 5 |
-| Warmup | 300 steps |
-| Quantization | 4-bit NF4 |
-| Training data | ~47k samples (Rebrickable 3x upsampled + StableText2Brick) |
+| Base model | Qwen 4B |
+| LoRA rank / alpha | 32 / 64 |
+| LoRA targets | q_proj, v_proj |
+| Learning rate | 1e-3 (cosine schedule) |
+| Batch size | 1 (grad accum 16, effective 16) |
+| Epochs | 3 |
+| Quantization | full precision (bf16) |
+| Max sequence length | 4096 tokens |
+| Loss weighting | Structure-aware (3x on coordinates, 0.1x on syntax) |
+| Curriculum | Untruncated samples first |
 
-### Evaluation Metrics
+### Stage 2 Inference Features
 
-Computed during evaluation steps via `compute_metrics` in both training scripts:
-
-- **JSON Validity Rate**: % of outputs that parse as valid JSON
-- **Field Accuracy**: Exact match on category, subcategory, complexity
-- **Color F1**: Set-based F1 on predicted vs reference dominant colors
-- **Parts F1**: Quantity-weighted F1 on predicted vs reference part lists
+- **Rejection sampling**: Invalid bricks (out of bounds, collisions, bad dimensions) are discarded and regenerated with increasing temperature
+- **Physics rollback**: When an unstable brick is detected, the sequence is truncated to the last stable point and generation resumes
+- **Temperature scheduling**: Starts at 0.6, increments by 0.01 per rejection up to 2.0
 
 ## API Reference
 
-### `POST /api/generate`
+### `POST /api/generate-bricks`
 
-Upload an image to generate a LEGO build plan.
+Generate a LEGO model from an image or text prompt.
 
-- **Body**: `multipart/form-data` with `image` file and optional `prompt` string
-- **Response**: `{description, steps[], metadata: {model_version, generation_time_ms, json_valid, errors}, validation: {score, checks[], summary}}`
-
-### `POST /api/generate-from-text`
-
-Generate a LEGO build plan from a text description.
-
-- **Body**: `multipart/form-data` with `prompt` string
-- **Response**: Same as above
-
-### `POST /api/validate`
-
-Validate an existing LEGO build description for structural stability and part legality.
-
-- **Body**: `application/json` with a `LegoDescription` object
-- **Response**: `{score: 0-100, checks: [{name, category, status, message, details?}], summary}`
-- **Check categories**: `legality` (part existence, compatibility, colors, quantities) and `stability` (foundation, connectivity, support ratio, build order, center of mass, cantilever)
+- **Body**: `multipart/form-data` with optional `image` file and/or `prompt` string
+- **Response**:
+```json
+{
+  "bricks": "2x4 (5,3,0) #C91A09\n1x2 (7,3,1) #FFFFFF\n...",
+  "caption": "A small red house with white trim",
+  "brick_count": 42,
+  "stable": true,
+  "metadata": {
+    "model_version": "qwen35-4b-brick-v1",
+    "generation_time_ms": 3200,
+    "rejections": 5,
+    "rollbacks": 0
+  }
+}
+```
 
 ### `GET /health`
 
@@ -253,18 +235,7 @@ Health check endpoint.
 |-------|-----------|
 | Frontend | React 19, TypeScript, Tailwind CSS, Three.js, React-Three-Fiber, Vite |
 | Backend | FastAPI, Python 3.11 |
-| Models | Qwen3-VL-8B, Qwen3.5-9B, QLoRA, BitsAndBytes |
-| Training | HuggingFace Transformers + Trainer, PEFT, W&B |
-| Data | Rebrickable database, StableText2Brick (HuggingFace) |
-
-## What's New in V3
-
-- **Qwen3-VL-8B vision model** replacing Qwen2.5-VL-7B for image-to-JSON generation
-- **Qwen3.5-9B planner model** with hybrid DeltaNet/Attention architecture for text-to-JSON generation
-- **StableText2Brick integration**: 41k additional training examples (per-brick coordinates are aggregated into subassembly-level descriptions during conversion)
-- **Expanded LoRA**: rank 64/alpha 128 with `all-linear` targeting for Qwen3.5's hybrid layers
-- **Lower learning rates** (2e-4 -> 1e-4 for vision, 3e-5 for planner) for more stable convergence
-- **Optimized training**: 5 epochs, batch 2 with grad accum 8 (effective 16), gradient checkpointing enabled (RTX 5090)
-- **Prompt diversity**: 17 template variants with color-aware prompts and curriculum rotation
-- **Gradient checkpointing fix**: `enable_input_require_grads()` for QLoRA + gradient checkpointing compatibility
-- **Dual pipeline**: Independent vision and planner inference paths with shared constraint engine
+| Stage 1 | Qwen 7B VL, QLoRA, BitsAndBytes |
+| Stage 2 | Qwen 4B, LoRA, rejection sampling, physics rollback |
+| Training | HuggingFace Transformers + TRL SFTTrainer, PEFT, W&B |
+| Data | StableText2Brick (HuggingFace), COCO 2017, Rebrickable |

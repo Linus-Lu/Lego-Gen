@@ -10,43 +10,59 @@ def dev_mode():
     yield
     # Reset singleton so next test gets fresh pipeline
     import backend.inference.pipeline as p
-    p._unified_instance = None
+    p._pipeline_instance = None
 
 
-def test_text_input_skips_stage1():
-    """Text-only input should go directly to Stage 2."""
+def test_text_input_generates_bricks():
+    """Text-only input should produce brick coordinates via Stage 2."""
     from backend.inference.pipeline import get_pipeline
 
     pipeline = get_pipeline()
-    result = pipeline.generate_build_from_text("a small red house")
+    result = pipeline.generate_brick_build("a small red house")
 
-    assert "description" in result
-    assert "steps" in result
+    assert "bricks" in result
+    assert "brick_count" in result
+    assert "stable" in result
     assert "metadata" in result
 
 
-def test_generate_response_has_required_fields():
-    """Pipeline output should have description, steps, metadata, validation."""
+def test_image_input_generates_bricks():
+    """Image input should go through Stage 1 caption then Stage 2 bricks."""
     from backend.inference.pipeline import get_pipeline
+    from PIL import Image
 
     pipeline = get_pipeline()
-    result = pipeline.generate_build_from_text("a blue car")
+    dummy_image = Image.new("RGB", (224, 224), (128, 128, 128))
+    result = pipeline.generate_brick_build_from_image(dummy_image)
 
-    assert isinstance(result["description"], dict)
-    assert isinstance(result["steps"], list)
-    assert "model_version" in result["metadata"]
-    assert "validation" in result
+    assert "bricks" in result
+    assert "caption" in result
+    assert result["brick_count"] > 0
 
 
 def test_mock_pipeline_returns_valid_structure():
-    """Mock pipeline should return complete structure for dev testing."""
+    """Mock pipeline should return complete brick structure for dev testing."""
     from backend.inference.pipeline import get_pipeline
 
     pipeline = get_pipeline()
-    result = pipeline.generate_build_from_text("test")
+    result = pipeline.generate_brick_build("test")
 
-    desc = result["description"]
-    assert "object" in desc
-    assert "subassemblies" in desc
-    assert len(result["steps"]) > 0
-    assert result["steps"][0]["step_number"] == 1
+    assert result["brick_count"] > 0
+    assert result["stable"] is True
+    assert "model_version" in result["metadata"]
+    # Verify brick format is parseable
+    lines = result["bricks"].strip().split("\n")
+    assert len(lines) == result["brick_count"]
+
+
+def test_stage1_description():
+    """Stage 1 should return a text description from an image."""
+    from backend.inference.pipeline import get_pipeline
+    from PIL import Image
+
+    pipeline = get_pipeline()
+    dummy_image = Image.new("RGB", (224, 224), (128, 128, 128))
+    description = pipeline.describe_image_stage1(dummy_image)
+
+    assert isinstance(description, str)
+    assert len(description) > 0
