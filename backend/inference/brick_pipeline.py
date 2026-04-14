@@ -1,6 +1,5 @@
 """Stage 2 inference: text -> colored brick sequence with rejection + rollback."""
 
-import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -9,13 +8,10 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
-from backend.brick.constants import BRICK_SHAPES, WORLD_DIM
-from backend.brick.parser import Brick, parse_brick, serialize_brick
+from backend.brick.parser import Brick, parse_brick, serialize_brick, _BRICK_RE
 from backend.brick.occupancy import VoxelGrid
 from backend.brick.stability import is_stable, find_first_unstable
 from backend.config import BRICK_MODEL_NAME, BRICK_CHECKPOINT_DIR
-
-_BRICK_RE = re.compile(r"(\d+)x(\d+) \((\d+),(\d+),(\d+)\) #([0-9A-Fa-f]{6})")
 
 MAX_BRICKS = 500
 MAX_REJECTIONS = 500
@@ -95,12 +91,16 @@ class BrickPipeline:
         brick_token_lengths: list[int] = []
         base_input_len = input_ids.shape[1]
         grid = VoxelGrid()
+        past_key_values = None
         total_rejections = 0
         total_rollbacks = 0
+        structure_stable = True
 
         for _ in range(MAX_ROLLBACKS):
             while len(bricks) < MAX_BRICKS:
-                brick, rej = self._generate_one_brick(input_ids, grid)
+                brick, rej, past_key_values = self._generate_one_brick(
+                    input_ids, grid, past_key_values
+                )
                 total_rejections += rej
                 if brick is None:
                     break
@@ -114,29 +114,31 @@ class BrickPipeline:
                     [input_ids, torch.tensor([brick_ids], device=self.device)], dim=1
                 )
 
-            if is_stable(bricks):
+            structure_stable = is_stable(bricks)
+            if structure_stable:
                 break
 
             idx = find_first_unstable(bricks)
             if idx <= 0:
                 break
 
-            # Rollback by slicing input_ids instead of re-tokenizing
+            # Remove only the dropped bricks from the grid instead of
+            # clearing and re-placing all remaining bricks.
+            for b in bricks[idx:]:
+                grid.remove(b)
             bricks = bricks[:idx]
-            truncated_token_lengths = brick_token_lengths[:idx]
-            brick_token_lengths = truncated_token_lengths
-            tokens_to_keep = base_input_len + sum(truncated_token_lengths)
+            brick_token_lengths = brick_token_lengths[:idx]
+            tokens_to_keep = base_input_len + sum(brick_token_lengths)
             input_ids = input_ids[:, :tokens_to_keep]
 
-            grid.clear()
-            for b in bricks:
-                grid.place(b)
+            # Invalidate KV cache after rollback since the sequence changed
+            past_key_values = None
             total_rollbacks += 1
 
         return {
             "bricks": "\n".join(serialize_brick(b) for b in bricks),
             "brick_count": len(bricks),
-            "stable": is_stable(bricks),
+            "stable": structure_stable,
             "metadata": {
                 "model_version": "qwen35-4b-brick-v1",
                 "generation_time_ms": int((time.time() - t0) * 1000),
@@ -146,16 +148,20 @@ class BrickPipeline:
         }
 
     def _generate_one_brick(
-        self, input_ids: torch.Tensor, grid: VoxelGrid
-    ) -> tuple[Optional[Brick], int]:
+        self,
+        input_ids: torch.Tensor,
+        grid: VoxelGrid,
+        past_key_values=None,
+    ) -> tuple[Optional[Brick], int, any]:
         """Generate one valid brick via rejection sampling.
 
-        Returns (Brick or None, rejection_count). Returns None when the model
-        emits EOS or empty output, signalling end of generation.
+        Returns (Brick or None, rejection_count, past_key_values). Returns
+        None when the model emits EOS or empty output, signalling end of
+        generation. Passes through the KV cache for reuse on the next call.
         """
         temp = BASE_TEMPERATURE
         for attempt in range(MAX_REJECTIONS):
-            with torch.no_grad():
+            with torch.inference_mode():
                 out = self.model.generate(
                     input_ids,
                     max_new_tokens=30,
@@ -169,7 +175,7 @@ class BrickPipeline:
                 out[0, input_ids.shape[1] :], skip_special_tokens=False
             )
             if self.tokenizer.eos_token in text or not text.strip():
-                return None, attempt
+                return None, attempt, None
             first_line = text.strip().split("\n")[0].strip()
             m = _BRICK_RE.fullmatch(first_line)
             if not m:
@@ -179,5 +185,5 @@ class BrickPipeline:
             if not grid.can_place(brick):
                 temp = min(temp + TEMP_INCREMENT, MAX_TEMPERATURE)
                 continue
-            return brick, attempt
-        return None, MAX_REJECTIONS
+            return brick, attempt, None
+        return None, MAX_REJECTIONS, None

@@ -1,6 +1,7 @@
 """Prompt templates and JSON encoding/decoding utilities for Qwen3-VL fine-tuning."""
 
 import json
+import re
 from pathlib import Path
 
 import sys
@@ -165,10 +166,12 @@ def decode_and_parse(token_ids, tokenizer) -> dict | None:
     return extract_json_from_text(raw)
 
 
+_THINKING_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
 def strip_thinking_blocks(text: str) -> str:
     """Remove <think>...</think> blocks from model output."""
-    import re
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    return _THINKING_RE.sub("", text).strip()
 
 
 def extract_json_from_text(text: str) -> dict | None:

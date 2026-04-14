@@ -4,6 +4,7 @@ Stage 1: Image → text description (Qwen VL 7B)
 Stage 2: Text → brick coordinates (Qwen 4B)
 """
 
+import threading
 import time
 from pathlib import Path
 
@@ -25,16 +26,20 @@ from backend.config import (
 # ── Singletons ────────────────────────────────────────────────────────
 
 _pipeline_instance = None
+_pipeline_lock = threading.Lock()
 
 
 def get_pipeline():
-    """Get or create the pipeline instance."""
+    """Get or create the pipeline instance (thread-safe)."""
     global _pipeline_instance
     if _pipeline_instance is None:
-        if LEGOGEN_DEV:
-            _pipeline_instance = MockPipeline()
-        else:
-            _pipeline_instance = TwoStagePipeline()
+        with _pipeline_lock:
+            # Double-checked locking
+            if _pipeline_instance is None:
+                if LEGOGEN_DEV:
+                    _pipeline_instance = MockPipeline()
+                else:
+                    _pipeline_instance = TwoStagePipeline()
     return _pipeline_instance
 
 

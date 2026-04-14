@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, UploadFile, HTTPException
@@ -15,6 +16,11 @@ from backend.config import INFERENCE_TIMEOUT_SECONDS
 
 router = APIRouter(prefix="/api", tags=["generate"])
 
+# Dedicated single-thread pool for GPU inference. A single worker prevents
+# concurrent model.generate() calls that would thrash GPU memory and
+# serialize on the CUDA stream anyway.
+_inference_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="inference")
+
 
 @router.post("/generate-bricks")
 async def generate_bricks(
@@ -27,6 +33,9 @@ async def generate_bricks(
       Stage 1 (if image): Image → text description (Qwen 7B)
       Stage 2: Text → brick coordinates (Qwen 4B)
     """
+    pipeline = get_pipeline()
+    loop = asyncio.get_running_loop()
+
     if image and image.filename:
         if image.content_type and not image.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="Uploaded file must be an image")
@@ -37,24 +46,22 @@ async def generate_bricks(
             raise HTTPException(status_code=400, detail="Could not read the uploaded image") from exc
         del contents
 
-        pipeline = get_pipeline()
-        loop = asyncio.get_event_loop()
         try:
             result = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None, lambda: pipeline.generate_brick_build_from_image(pil_image)
+                    _inference_executor,
+                    lambda: pipeline.generate_brick_build_from_image(pil_image),
                 ),
                 timeout=INFERENCE_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
             raise HTTPException(status_code=504, detail=f"Inference timed out after {INFERENCE_TIMEOUT_SECONDS}s")
     elif prompt and prompt.strip():
-        pipeline = get_pipeline()
-        loop = asyncio.get_event_loop()
         try:
             result = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None, lambda: pipeline.generate_brick_build(prompt.strip())
+                    _inference_executor,
+                    lambda: pipeline.generate_brick_build(prompt.strip()),
                 ),
                 timeout=INFERENCE_TIMEOUT_SECONDS,
             )

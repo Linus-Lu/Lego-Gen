@@ -58,11 +58,52 @@ def is_stable(bricks: list[Brick]) -> bool:
 def find_first_unstable(bricks: list[Brick]) -> int:
     """Return the index of the first brick that makes the structure unstable.
 
-    Checks prefixes of increasing length: [bricks[0]], [bricks[0], bricks[1]],
-    etc. Returns the index of the first brick whose addition causes instability,
+    Uses an incremental approach: maintains an adjacency list and a set of
+    grounded brick indices as bricks are added one at a time. When a new
+    brick is added, only its edges to existing bricks are computed, and a
+    BFS propagates ground-reachability through any newly connected bricks.
+
+    This is O(n²) overall instead of the naive O(n³) prefix-check approach.
+
+    Returns the index of the first brick whose addition causes instability,
     or -1 if the full structure is stable.
     """
-    for i in range(1, len(bricks) + 1):
-        if not is_stable(bricks[:i]):
-            return i - 1
+    if not bricks:
+        return -1
+
+    adj: list[list[int]] = []
+    grounded: set[int] = set()
+
+    for i, brick in enumerate(bricks):
+        # Add adjacency entries for the new brick
+        adj.append([])
+        for j in range(i):
+            if abs(bricks[j].z - brick.z) == 1 and _overlaps_xy(bricks[j], brick):
+                adj[i].append(j)
+                adj[j].append(i)
+
+        # Check if the new brick is grounded (directly or via neighbors)
+        newly_grounded = False
+        if brick.z == 0:
+            newly_grounded = True
+        else:
+            for j in adj[i]:
+                if j in grounded:
+                    newly_grounded = True
+                    break
+
+        if not newly_grounded:
+            return i
+
+        # BFS: the new brick is grounded, propagate to any previously
+        # ungrounded neighbors that can now reach ground through it.
+        grounded.add(i)
+        queue: deque[int] = deque([i])
+        while queue:
+            current = queue.popleft()
+            for neighbor in adj[current]:
+                if neighbor not in grounded:
+                    grounded.add(neighbor)
+                    queue.append(neighbor)
+
     return -1

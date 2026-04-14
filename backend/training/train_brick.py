@@ -76,17 +76,31 @@ class BrickStructureWeights:
               f"structure token IDs: {len(self.structure_ids)}")
 
     def get_weights(self, labels: torch.Tensor) -> torch.Tensor:
-        """Return per-token weights. Shape matches labels. Vectorized."""
-        weights = torch.ones_like(labels, dtype=torch.float32)
+        """Return per-token weights. Shape matches labels. Vectorized.
 
-        if self.boilerplate_ids:
-            bp_ids = torch.tensor(list(self.boilerplate_ids), device=labels.device)
-            bp_mask = (labels.unsqueeze(-1) == bp_ids).any(-1)
+        Caches ID tensors per-device to avoid re-creating them every call.
+        """
+        weights = torch.ones_like(labels, dtype=torch.float32)
+        device = labels.device
+
+        # Lazily cache tensors per device to avoid repeated allocation
+        if not hasattr(self, "_cached_device") or self._cached_device != device:
+            self._cached_bp_ids = (
+                torch.tensor(sorted(self.boilerplate_ids), device=device)
+                if self.boilerplate_ids else None
+            )
+            self._cached_st_ids = (
+                torch.tensor(sorted(self.structure_ids), device=device)
+                if self.structure_ids else None
+            )
+            self._cached_device = device
+
+        if self._cached_bp_ids is not None:
+            bp_mask = (labels.unsqueeze(-1) == self._cached_bp_ids).any(-1)
             weights[bp_mask] = self.boilerplate_weight
 
-        if self.structure_ids:
-            st_ids = torch.tensor(list(self.structure_ids), device=labels.device)
-            st_mask = (labels.unsqueeze(-1) == st_ids).any(-1)
+        if self._cached_st_ids is not None:
+            st_mask = (labels.unsqueeze(-1) == self._cached_st_ids).any(-1)
             weights[st_mask] = self.structure_weight
 
         # Masked tokens (-100) get weight 0
