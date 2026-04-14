@@ -55,6 +55,7 @@ def test_generate_with_prompt():
     body = resp.json()
     assert "bricks" in body
     assert "caption" in body
+    assert body["caption"] == "a small red house"
     assert "brick_count" in body
     assert body["brick_count"] > 0
     assert "stable" in body

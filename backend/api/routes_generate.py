@@ -51,15 +51,17 @@ async def generate_bricks(
     elif prompt and prompt.strip():
         pipeline = get_pipeline()
         loop = asyncio.get_event_loop()
+        caption = prompt.strip()
         try:
             result = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None, lambda: pipeline.generate_brick_build(prompt.strip())
+                    None, lambda: pipeline.generate_brick_build(caption)
                 ),
                 timeout=INFERENCE_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
             raise HTTPException(status_code=504, detail=f"Inference timed out after {INFERENCE_TIMEOUT_SECONDS}s")
+        result.setdefault("caption", caption)
     else:
         raise HTTPException(status_code=400, detail="Provide an image or prompt")
 

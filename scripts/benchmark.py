@@ -532,7 +532,7 @@ def main():
                 result = pipeline.generate_brick_build_from_image(image)
 
             latency = (time.time() - t0) * 1000
-            pred = result.get("description", {})
+            pred = result
 
             # ── Stage 1 metrics (if two-stage and description available)
             if not args.stage2_only and hasattr(pipeline, "last_stage1_description"):
