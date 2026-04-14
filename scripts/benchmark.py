@@ -257,22 +257,86 @@ def evaluate_stage2(pred: dict, ref: dict, known_part_ids: set | None = None) ->
 # ═══════════════════════════════════════════════════════════════════════
 
 def evaluate_stability(pred: dict) -> dict:
-    """Run stability checker and return score + per-check results."""
+    """Run stability checker and return score + per-check results.
+
+    When per-brick reliability scores are available in *pred*'s metadata
+    (produced by the updated generation pipeline), the returned dict also
+    includes ``avg_reliability_score``, ``min_reliability_score``,
+    ``support_ratio_mean``, and ``floating_brick_count``.
+    """
     try:
         from backend.brick.stability import is_stable
         from backend.brick.parser import parse_brick_sequence
+        from backend.brick.reliability import ReliabilityScorer
+        from backend.brick.occupancy import VoxelGrid
+
         bricks_text = pred.get("bricks", "")
-        if bricks_text:
-            bricks = parse_brick_sequence(bricks_text)
-            stable = is_stable(bricks)
+        if not bricks_text:
             return {
-                "stability_score": 100 if stable else 0,
-                "stability_checks_passed": 1 if stable else 0,
+                "stability_score": 0,
+                "stability_checks_passed": 0,
                 "stability_checks_total": 1,
+                "avg_reliability_score": 0.0,
+                "min_reliability_score": 0.0,
+                "support_ratio_mean": 0.0,
+                "floating_brick_count": 0,
             }
-        return {"stability_score": 0, "stability_checks_passed": 0, "stability_checks_total": 1}
+
+        bricks = parse_brick_sequence(bricks_text)
+        stable = is_stable(bricks)
+
+        # If the pipeline already included reliability scores, use them.
+        metadata = pred.get("metadata", {})
+        if "avg_reliability_score" in metadata:
+            avg_rel = metadata["avg_reliability_score"]
+            min_rel = metadata["min_reliability_score"]
+            scores_list = metadata.get("reliability_scores", [])
+        else:
+            # Recompute reliability scores for offline evaluation.
+            grid = VoxelGrid()
+            scorer = ReliabilityScorer(grid)
+            for brick in bricks:
+                scorer.add_brick(brick)
+                grid.place(brick)
+            avg_rel = scorer.aggregate_score()
+            min_rel = scorer.min_score()
+            scores_list = [s.score for s in scorer.scores]
+
+        # Compute per-brick breakdown metrics.
+        floating_count = 0
+        support_ratios: list[float] = []
+        if scores_list:
+            # Recompute from bricks to get support_ratio and connectivity.
+            grid2 = VoxelGrid()
+            scorer2 = ReliabilityScorer(grid2)
+            for brick in bricks:
+                bs = scorer2.add_brick(brick)
+                grid2.place(brick)
+                if bs.connectivity == 0.0:
+                    floating_count += 1
+                support_ratios.append(bs.support_ratio)
+
+        return {
+            "stability_score": 100 if stable else 0,
+            "stability_checks_passed": 1 if stable else 0,
+            "stability_checks_total": 1,
+            "avg_reliability_score": avg_rel,
+            "min_reliability_score": min_rel,
+            "support_ratio_mean": (
+                float(np.mean(support_ratios)) if support_ratios else 0.0
+            ),
+            "floating_brick_count": floating_count,
+        }
     except Exception:
-        return {"stability_score": 0, "stability_checks_passed": 0, "stability_checks_total": 1}
+        return {
+            "stability_score": 0,
+            "stability_checks_passed": 0,
+            "stability_checks_total": 1,
+            "avg_reliability_score": 0.0,
+            "min_reliability_score": 0.0,
+            "support_ratio_mean": 0.0,
+            "floating_brick_count": 0,
+        }
 
 
 # ═══════════════════════════════════════════════════════════════════════

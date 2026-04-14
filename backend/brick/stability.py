@@ -66,3 +66,26 @@ def find_first_unstable(bricks: list[Brick]) -> int:
         if not is_stable(bricks[:i]):
             return i - 1
     return -1
+
+
+def is_brick_connected(
+    brick: Brick, existing_bricks: list[Brick], ground_set: set[int]
+) -> bool:
+    """Check whether *brick* connects to the ground-reachable set.
+
+    A brick is connected when:
+    - it sits at z=0 (on the ground), **or**
+    - at least one brick in *existing_bricks* whose index is in *ground_set*
+      is vertically adjacent (|z diff| == 1) and overlaps in XY.
+
+    Runs in O(n) where n = len(existing_bricks), much faster than rebuilding
+    the full adjacency graph with :func:`is_stable`.
+    """
+    if brick.z == 0:
+        return True
+    for idx, other in enumerate(existing_bricks):
+        if idx not in ground_set:
+            continue
+        if abs(brick.z - other.z) == 1 and _overlaps_xy(brick, other):
+            return True
+    return False

@@ -12,8 +12,9 @@ from peft import PeftModel
 from backend.brick.constants import BRICK_SHAPES, WORLD_DIM
 from backend.brick.parser import Brick, parse_brick, serialize_brick
 from backend.brick.occupancy import VoxelGrid
-from backend.brick.stability import is_stable, find_first_unstable
-from backend.config import BRICK_MODEL_NAME, BRICK_CHECKPOINT_DIR
+from backend.brick.stability import is_stable, find_first_unstable, is_brick_connected
+from backend.brick.reliability import ReliabilityScorer
+from backend.config import BRICK_MODEL_NAME, BRICK_CHECKPOINT_DIR, RELIABILITY_SCORE_THRESHOLD
 
 _BRICK_RE = re.compile(r"(\d+)x(\d+) \((\d+),(\d+),(\d+)\) #([0-9A-Fa-f]{6})")
 
@@ -76,7 +77,7 @@ class BrickPipeline:
         - bricks: newline-separated brick text
         - brick_count: number of bricks placed
         - stable: whether the final structure is stable
-        - metadata: generation statistics
+        - metadata: generation statistics (including reliability scores)
         """
         t0 = time.time()
         messages = [
@@ -95,15 +96,19 @@ class BrickPipeline:
         brick_token_lengths: list[int] = []
         base_input_len = input_ids.shape[1]
         grid = VoxelGrid()
+        scorer = ReliabilityScorer(grid)
         total_rejections = 0
         total_rollbacks = 0
 
         for _ in range(MAX_ROLLBACKS):
             while len(bricks) < MAX_BRICKS:
-                brick, rej = self._generate_one_brick(input_ids, grid)
+                brick, rej = self._generate_one_brick(input_ids, grid, scorer)
                 total_rejections += rej
                 if brick is None:
                     break
+                # Score the brick *before* placing it in the grid so
+                # support_ratio reads the pre-placement occupancy.
+                brick_score = scorer.add_brick(brick)
                 bricks.append(brick)
                 grid.place(brick)
                 brick_ids = self.tokenizer.encode(
@@ -114,6 +119,8 @@ class BrickPipeline:
                     [input_ids, torch.tensor([brick_ids], device=self.device)], dim=1
                 )
 
+            # Safety-net: full connectivity check (should rarely fail now
+            # that every brick is checked incrementally).
             if is_stable(bricks):
                 break
 
@@ -131,8 +138,10 @@ class BrickPipeline:
             grid.clear()
             for b in bricks:
                 grid.place(b)
+            scorer.remove_last(len(scorer.scores) - idx)
             total_rollbacks += 1
 
+        reliability_scores = [s.score for s in scorer.scores]
         return {
             "bricks": "\n".join(serialize_brick(b) for b in bricks),
             "brick_count": len(bricks),
@@ -142,13 +151,26 @@ class BrickPipeline:
                 "generation_time_ms": int((time.time() - t0) * 1000),
                 "rejections": total_rejections,
                 "rollbacks": total_rollbacks,
+                "avg_reliability_score": scorer.aggregate_score(),
+                "min_reliability_score": scorer.min_score(),
+                "reliability_scores": reliability_scores,
             },
         }
 
     def _generate_one_brick(
-        self, input_ids: torch.Tensor, grid: VoxelGrid
+        self,
+        input_ids: torch.Tensor,
+        grid: VoxelGrid,
+        scorer: ReliabilityScorer,
     ) -> tuple[Optional[Brick], int]:
         """Generate one valid brick via rejection sampling.
+
+        Each candidate brick must pass three checks before it is accepted:
+        1. **Format** — matches the ``HxW (x,y,z) #RRGGBB`` regex.
+        2. **Collision** — ``grid.can_place`` confirms no overlap.
+        3. **Connectivity** — the brick must connect to the ground-reachable
+           set tracked by *scorer* (incremental stability check inspired by
+           BrickGPT's per-step reliability verification).
 
         Returns (Brick or None, rejection_count). Returns None when the model
         emits EOS or empty output, signalling end of generation.
@@ -177,6 +199,13 @@ class BrickPipeline:
                 continue
             brick = parse_brick(first_line)
             if not grid.can_place(brick):
+                temp = min(temp + TEMP_INCREMENT, MAX_TEMPERATURE)
+                continue
+            # Incremental connectivity check: reject floating bricks
+            # immediately rather than discovering them post-generation.
+            if not is_brick_connected(
+                brick, scorer._bricks, scorer._ground_set
+            ):
                 temp = min(temp + TEMP_INCREMENT, MAX_TEMPERATURE)
                 continue
             return brick, attempt

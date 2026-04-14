@@ -90,6 +90,12 @@ MAX_GRAD_NORM = 1.0
 LOGGING_STEPS = 10
 SAVE_TOTAL_LIMIT = 2
 
+# ── Reliability Scoring ───────────────────────────────────────────────
+RELIABILITY_SCORE_THRESHOLD = 0.3
+RELIABILITY_WEIGHT_CONNECTIVITY = 0.5
+RELIABILITY_WEIGHT_SUPPORT = 0.35
+RELIABILITY_WEIGHT_NEIGHBORS = 0.15
+
 # ── Inference ──────────────────────────────────────────────────────────
 MAX_NEW_TOKENS = 2048
 TEMPERATURE = 0.7
