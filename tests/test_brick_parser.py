@@ -31,3 +31,19 @@ def test_parse_sequence():
 def test_parse_sequence_empty():
     assert parse_brick_sequence("") == []
     assert parse_brick_sequence("  \n  ") == []
+
+
+def test_parse_brick_at_origin():
+    b = parse_brick("1x1 (0,0,0) #000000")
+    assert b == Brick(h=1, w=1, x=0, y=0, z=0, color="000000")
+
+
+def test_parse_brick_at_grid_max():
+    b = parse_brick("1x1 (19,19,19) #FFFFFF")
+    assert b == Brick(h=1, w=1, x=19, y=19, z=19, color="FFFFFF")
+
+
+def test_parse_sequence_with_blank_lines():
+    raw = "2x4 (0,0,0) #C91A09\n\n\n1x2 (1,0,1) #05131D\n"
+    bricks = parse_brick_sequence(raw)
+    assert len(bricks) == 2

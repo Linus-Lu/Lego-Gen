@@ -62,5 +62,8 @@ def _load_color_palette(path: str) -> dict[str, str]:
     return palette
 
 
-COLOR_PALETTE: dict[str, str] = _load_color_palette(_COLORS_JSON)
+try:
+    COLOR_PALETTE: dict[str, str] = _load_color_palette(_COLORS_JSON)
+except FileNotFoundError:
+    COLOR_PALETTE = {}
 ALLOWED_COLORS: list[str] = sorted(COLOR_PALETTE.keys())

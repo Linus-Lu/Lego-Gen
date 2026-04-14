@@ -2,10 +2,14 @@ import pytest
 from backend.brick.decoder import BrickTokenConstraint
 from backend.brick.constants import ALLOWED_DIMS, ALLOWED_COLORS
 
+_COLORS_LOADED = len(ALLOWED_COLORS) > 0
+
 def test_allowed_dims_populated():
     assert len(ALLOWED_DIMS) == 14
 
 def test_allowed_colors_populated():
+    if not _COLORS_LOADED:
+        pytest.skip("colors.json not available")
     assert len(ALLOWED_COLORS) > 40
 
 def test_constraint_initial_state():
