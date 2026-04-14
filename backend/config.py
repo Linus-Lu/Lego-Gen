@@ -24,8 +24,13 @@ MAX_PARTS = 500
 VAL_RATIO = 0.1
 SPLITS_FILE = DATA_DIR / "splits.json"
 
-# ── Stage 1: Image -> Text Description (Qwen VL 7B + LoRA) ──────────
-UNIFIED_MODEL_NAME = "Qwen/Qwen3.5-9B"
+# ── Stage 1: Image -> Text Description (Qwen3.5-9B VL + LoRA) ───────
+# Qwen3.5-9B is a vision-language model; the same base serves both stages
+# via adapter swapping.  Stage 1 uses a lightweight LoRA for image→text;
+# Stage 2 uses the default LoRA for text→JSON (used by BrickPipeline's
+# caption input path).
+STAGE1_MODEL_NAME = "Qwen/Qwen3.5-9B"
+UNIFIED_MODEL_NAME = STAGE1_MODEL_NAME  # alias kept for existing imports
 UNIFIED_CHECKPOINT_DIR = CHECKPOINT_DIR / "qwen35-9b-lego-stage2-lora"
 UNIFIED_QUANTIZATION_BITS = 4
 UNIFIED_MAX_SEQ_LENGTH = 4096

@@ -46,7 +46,6 @@ const Header: React.FC = () => {
           <ul className="flex items-center gap-1">
             {navLink('/', 'Home')}
             {navLink('/build', 'Build')}
-            {navLink('/explore', 'Explore')}
             {navLink('/about', 'About')}
           </ul>
         </nav>

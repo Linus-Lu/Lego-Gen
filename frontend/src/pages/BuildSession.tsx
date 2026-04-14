@@ -78,6 +78,10 @@ const BuildSession: React.FC = () => {
       setBricks(parsed);
       setCurrentStep(1);
 
+      // Compute layers from parsed bricks directly to avoid stale useMemo state
+      const { steps: freshSteps } = bricksToSteps(parsed);
+      const layerCount = freshSteps.length;
+
       const resultMessage: Message = {
         role: 'assistant',
         type: 'brick-result',
@@ -98,7 +102,7 @@ const BuildSession: React.FC = () => {
                 {result.stable ? 'Stable' : 'Unstable'}
               </span>
               <span className="px-2.5 py-1 rounded-lg bg-purple-500/10 border border-purple-500/20 text-purple-300">
-                {steps.length} layers
+                {layerCount} layers
               </span>
               <span className="text-gray-600 ml-1">
                 {result.metadata.generation_time_ms}ms
