@@ -1,7 +1,18 @@
-"""Stage 2 inference: text -> colored brick sequence with rejection + rollback."""
+"""Stage 2 inference: text -> colored brick sequence with rejection + rollback.
 
+Adopts several techniques from BrickGPT:
+  - Few-shot prompting with demonstration examples
+  - Per-brick rejection reason tracking (categorised counter)
+  - Rejected-brick deduplication (set-based, temperature only rises on repeats)
+  - Incremental connectivity checking via ReliabilityScorer
+  - Optional constrained decoding via logit masking
+  - KV-cache reuse across rejection attempts for efficiency
+"""
+
+import json
 import re
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
@@ -14,6 +25,7 @@ from backend.brick.parser import Brick, parse_brick, serialize_brick
 from backend.brick.occupancy import VoxelGrid
 from backend.brick.stability import is_stable, find_first_unstable, is_brick_connected
 from backend.brick.reliability import ReliabilityScorer
+from backend.brick.decoder import build_brick_logits_processor
 from backend.config import BRICK_MODEL_NAME, BRICK_CHECKPOINT_DIR, RELIABILITY_SCORE_THRESHOLD
 
 _BRICK_RE = re.compile(r"(\d+)x(\d+) \((\d+),(\d+),(\d+)\) #([0-9A-Fa-f]{6})")
@@ -26,11 +38,50 @@ TEMP_INCREMENT = 0.01
 MAX_TEMPERATURE = 2.0
 
 SYSTEM_PROMPT = "You are a LEGO master builder."
+
+# ── Few-shot examples ────────────────────────────────────────────────
+_FEW_SHOT_PATH = Path(__file__).resolve().parent.parent / "brick" / "few_shot_examples.json"
+
+
+def _load_few_shot_examples() -> list[dict]:
+    if _FEW_SHOT_PATH.exists():
+        with open(_FEW_SHOT_PATH, encoding="utf-8") as fh:
+            return json.load(fh)
+    return []
+
+
+_FEW_SHOT_EXAMPLES = _load_few_shot_examples()
+
+
+def _build_few_shot_block() -> str:
+    """Format the few-shot examples as a prompt block."""
+    if not _FEW_SHOT_EXAMPLES:
+        return ""
+    parts = ["Here are some example LEGO models:\n"]
+    for ex in _FEW_SHOT_EXAMPLES:
+        parts.append(f"### Input:\n{ex['caption']}\n### Output:\n{ex['bricks']}\n")
+    parts.append(
+        "Do NOT copy the examples. Create your own LEGO model for the "
+        "following input.\n"
+    )
+    return "\n".join(parts)
+
+
+_FEW_SHOT_BLOCK = _build_few_shot_block()
+
 USER_TEMPLATE = (
     "Create a colored LEGO model. Format: <dims> (<x>,<y>,<z>) <#hex>.\n"
     "Allowed dims: 2x4, 4x2, 2x6, 6x2, 1x2, 2x1, 1x4, 4x1, 1x6, 6x1, 1x8, 8x1, 1x1, 2x2.\n"
-    "All bricks are 1 unit tall.\n\n### Input:\n{caption}"
+    "All bricks are 1 unit tall.\n\n"
+    "{few_shot}"
+    "### Input:\n{caption}"
 )
+
+# ── Rejection reason labels ──────────────────────────────────────────
+_REJ_FORMAT = "ill_formatted"
+_REJ_COLLISION = "collision"
+_REJ_DISCONNECTED = "disconnected"
+_REJ_ALREADY = "already_rejected"
 
 
 class BrickPipeline:
@@ -70,6 +121,17 @@ class BrickPipeline:
         )
         self.model.eval()
 
+        # Try to build a constrained-decoding logits processor.  If the
+        # tokeniser is incompatible (some strings need >1 token) we fall
+        # back to regex-based post-validation.
+        self._logits_processor = build_brick_logits_processor(
+            self.tokenizer, eos_token_id=self.tokenizer.eos_token_id
+        )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def generate(self, caption: str) -> dict:
         """Generate a brick structure for *caption*.
 
@@ -82,7 +144,12 @@ class BrickPipeline:
         t0 = time.time()
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": USER_TEMPLATE.format(caption=caption)},
+            {
+                "role": "user",
+                "content": USER_TEMPLATE.format(
+                    caption=caption, few_shot=_FEW_SHOT_BLOCK
+                ),
+            },
         ]
         input_text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
@@ -92,32 +159,42 @@ class BrickPipeline:
         )
 
         bricks: list[Brick] = []
-        # Track the token length of each brick for efficient rollback
         brick_token_lengths: list[int] = []
         base_input_len = input_ids.shape[1]
         grid = VoxelGrid()
         scorer = ReliabilityScorer(grid)
-        total_rejections = 0
+        rejection_reasons: Counter = Counter()
         total_rollbacks = 0
+
+        # Pre-fill KV cache for the prompt so rejection attempts inside
+        # _generate_one_brick only process new tokens.
+        kv_cache = self._prefill_cache(input_ids)
 
         for _ in range(MAX_ROLLBACKS):
             while len(bricks) < MAX_BRICKS:
-                brick, rej = self._generate_one_brick(input_ids, grid, scorer)
-                total_rejections += rej
+                result = self._generate_one_brick(
+                    input_ids, grid, scorer, kv_cache
+                )
+                rejection_reasons.update(result["reasons"])
+                brick = result["brick"]
                 if brick is None:
                     break
-                # Score the brick *before* placing it in the grid so
-                # support_ratio reads the pre-placement occupancy.
-                brick_score = scorer.add_brick(brick)
+                # Score the brick *before* placing in grid (support_ratio
+                # reads the pre-placement occupancy).
+                scorer.add_brick(brick)
                 bricks.append(brick)
                 grid.place(brick)
                 brick_ids = self.tokenizer.encode(
                     serialize_brick(brick) + "\n", add_special_tokens=False
                 )
                 brick_token_lengths.append(len(brick_ids))
-                input_ids = torch.cat(
-                    [input_ids, torch.tensor([brick_ids], device=self.device)], dim=1
+                brick_id_tensor = torch.tensor(
+                    [brick_ids], device=self.device
                 )
+                input_ids = torch.cat([input_ids, brick_id_tensor], dim=1)
+
+                # Extend the KV cache with the accepted brick's tokens.
+                kv_cache = self._extend_cache(kv_cache, brick_id_tensor)
 
             # Safety-net: full connectivity check (should rarely fail now
             # that every brick is checked incrementally).
@@ -128,7 +205,7 @@ class BrickPipeline:
             if idx <= 0:
                 break
 
-            # Rollback by slicing input_ids instead of re-tokenizing
+            # Rollback
             bricks = bricks[:idx]
             truncated_token_lengths = brick_token_lengths[:idx]
             brick_token_lengths = truncated_token_lengths
@@ -141,6 +218,9 @@ class BrickPipeline:
             scorer.remove_last(len(scorer.scores) - idx)
             total_rollbacks += 1
 
+            # Rebuild KV cache after rollback.
+            kv_cache = self._prefill_cache(input_ids)
+
         reliability_scores = [s.score for s in scorer.scores]
         return {
             "bricks": "\n".join(serialize_brick(b) for b in bricks),
@@ -149,7 +229,8 @@ class BrickPipeline:
             "metadata": {
                 "model_version": "qwen35-4b-brick-v1",
                 "generation_time_ms": int((time.time() - t0) * 1000),
-                "rejections": total_rejections,
+                "rejections": rejection_reasons.total(),
+                "rejection_reasons": dict(rejection_reasons),
                 "rollbacks": total_rollbacks,
                 "avg_reliability_score": scorer.aggregate_score(),
                 "min_reliability_score": scorer.min_score(),
@@ -157,25 +238,38 @@ class BrickPipeline:
             },
         }
 
+    # ------------------------------------------------------------------
+    # Per-brick generation with rejection sampling
+    # ------------------------------------------------------------------
+
     def _generate_one_brick(
         self,
         input_ids: torch.Tensor,
         grid: VoxelGrid,
         scorer: ReliabilityScorer,
-    ) -> tuple[Optional[Brick], int]:
+        kv_cache: object | None,
+    ) -> dict:
         """Generate one valid brick via rejection sampling.
 
-        Each candidate brick must pass three checks before it is accepted:
-        1. **Format** — matches the ``HxW (x,y,z) #RRGGBB`` regex.
+        Each candidate must pass four checks:
+        1. **Format** — matches ``HxW (x,y,z) #RRGGBB`` regex.
         2. **Collision** — ``grid.can_place`` confirms no overlap.
-        3. **Connectivity** — the brick must connect to the ground-reachable
-           set tracked by *scorer* (incremental stability check inspired by
-           BrickGPT's per-step reliability verification).
+        3. **Connectivity** — brick connects to the ground-reachable set.
+        4. **Deduplication** — not in the already-rejected set.
 
-        Returns (Brick or None, rejection_count). Returns None when the model
-        emits EOS or empty output, signalling end of generation.
+        Returns ``{"brick": Brick | None, "reasons": Counter}``.
         """
         temp = BASE_TEMPERATURE
+        rejected_set: set[str] = set()
+        reasons: Counter = Counter()
+
+        # If we have a constrained-decoding processor, reset it.
+        logits_proc = self._logits_processor
+        gen_kwargs: dict = {}
+        if logits_proc is not None:
+            logits_proc.reset()
+            gen_kwargs["logits_processor"] = [logits_proc]
+
         for attempt in range(MAX_REJECTIONS):
             with torch.no_grad():
                 out = self.model.generate(
@@ -186,27 +280,77 @@ class BrickPipeline:
                     top_k=20,
                     pad_token_id=self.tokenizer.pad_token_id,
                     eos_token_id=self.tokenizer.eos_token_id,
+                    past_key_values=kv_cache,
+                    use_cache=True,
+                    **gen_kwargs,
                 )
             text = self.tokenizer.decode(
                 out[0, input_ids.shape[1] :], skip_special_tokens=False
             )
             if self.tokenizer.eos_token in text or not text.strip():
-                return None, attempt
+                return {"brick": None, "reasons": reasons}
+
             first_line = text.strip().split("\n")[0].strip()
+
+            # ── Deduplication check ───────────────────────────────────
+            if first_line in rejected_set:
+                reasons[_REJ_ALREADY] += 1
+                temp = min(temp + TEMP_INCREMENT, MAX_TEMPERATURE)
+                continue
+
+            # ── Format check ──────────────────────────────────────────
             m = _BRICK_RE.fullmatch(first_line)
             if not m:
-                temp = min(temp + TEMP_INCREMENT, MAX_TEMPERATURE)
-                continue
+                reasons[_REJ_FORMAT] += 1
+                rejected_set.add(first_line)
+                continue  # no temp increase for format errors
+
             brick = parse_brick(first_line)
+
+            # ── Collision check ───────────────────────────────────────
             if not grid.can_place(brick):
-                temp = min(temp + TEMP_INCREMENT, MAX_TEMPERATURE)
-                continue
-            # Incremental connectivity check: reject floating bricks
-            # immediately rather than discovering them post-generation.
+                reasons[_REJ_COLLISION] += 1
+                rejected_set.add(first_line)
+                continue  # no temp increase for collisions
+
+            # ── Connectivity check ────────────────────────────────────
             if not is_brick_connected(
                 brick, scorer._bricks, scorer._ground_set
             ):
-                temp = min(temp + TEMP_INCREMENT, MAX_TEMPERATURE)
-                continue
-            return brick, attempt
-        return None, MAX_REJECTIONS
+                reasons[_REJ_DISCONNECTED] += 1
+                rejected_set.add(first_line)
+                continue  # no temp increase for disconnected
+
+            return {"brick": brick, "reasons": reasons}
+
+        return {"brick": None, "reasons": reasons}
+
+    # ------------------------------------------------------------------
+    # KV cache helpers
+    # ------------------------------------------------------------------
+
+    def _prefill_cache(self, input_ids: torch.Tensor) -> object | None:
+        """Run a forward pass over *input_ids* and return the KV cache.
+
+        The cache allows subsequent ``generate()`` calls to skip reprocessing
+        the prompt + accepted bricks, processing only new candidate tokens.
+        """
+        try:
+            with torch.no_grad():
+                out = self.model(input_ids, use_cache=True)
+            return out.past_key_values
+        except Exception:
+            return None
+
+    def _extend_cache(
+        self, kv_cache: object | None, new_ids: torch.Tensor
+    ) -> object | None:
+        """Extend *kv_cache* with the representations of *new_ids*."""
+        if kv_cache is None:
+            return None
+        try:
+            with torch.no_grad():
+                out = self.model(new_ids, past_key_values=kv_cache, use_cache=True)
+            return out.past_key_values
+        except Exception:
+            return None

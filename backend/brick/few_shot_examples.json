@@ -1,0 +1,22 @@
+[
+  {
+    "caption": "A simple chair with four legs and a flat seat",
+    "bricks": "2x2 (0,0,0) #05131D\n2x2 (4,0,0) #05131D\n2x2 (0,4,0) #05131D\n2x2 (4,4,0) #05131D\n2x4 (0,0,1) #C91A09\n2x4 (0,2,1) #C91A09\n2x4 (2,0,1) #C91A09\n2x4 (2,2,1) #C91A09\n2x2 (0,0,2) #05131D\n2x2 (0,0,3) #05131D"
+  },
+  {
+    "caption": "A flat rectangular table with a wide top",
+    "bricks": "2x2 (0,0,0) #462F1D\n2x2 (6,0,0) #462F1D\n2x2 (0,6,0) #462F1D\n2x2 (6,6,0) #462F1D\n1x1 (0,0,1) #462F1D\n1x1 (7,0,1) #462F1D\n1x1 (0,7,1) #462F1D\n1x1 (7,7,1) #462F1D\n2x4 (0,0,2) #FEC401\n2x4 (0,4,2) #FEC401\n2x4 (4,0,2) #FEC401\n2x4 (4,4,2) #FEC401"
+  },
+  {
+    "caption": "A small red car with black wheels",
+    "bricks": "2x6 (0,0,0) #C91A09\n2x6 (0,0,1) #C91A09\n2x4 (1,0,2) #C91A09\n2x2 (0,0,2) #05131D\n2x2 (4,0,2) #05131D\n2x4 (1,0,3) #0055BF\n1x2 (0,1,0) #05131D\n1x2 (5,1,0) #05131D"
+  },
+  {
+    "caption": "A bed with a headboard and rectangular mattress",
+    "bricks": "2x6 (0,0,0) #462F1D\n2x6 (2,0,0) #462F1D\n2x6 (0,0,1) #FFFFFF\n2x6 (2,0,1) #FFFFFF\n2x4 (0,0,2) #0055BF\n2x4 (2,0,2) #0055BF\n2x2 (0,0,3) #462F1D\n2x2 (2,0,3) #462F1D"
+  },
+  {
+    "caption": "A small bookshelf with three layers",
+    "bricks": "2x4 (0,0,0) #462F1D\n2x4 (0,0,1) #462F1D\n1x4 (0,0,2) #462F1D\n1x4 (1,0,2) #C91A09\n2x4 (0,0,3) #462F1D\n1x4 (0,0,4) #237841\n1x4 (1,0,4) #0055BF\n2x4 (0,0,5) #462F1D"
+  }
+]

@@ -5,6 +5,7 @@ import io
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, UploadFile, HTTPException
+from fastapi.responses import PlainTextResponse
 from PIL import Image
 
 import sys
@@ -64,3 +65,27 @@ async def generate_bricks(
         raise HTTPException(status_code=400, detail="Provide an image or prompt")
 
     return result
+
+
+@router.post("/export-ldr")
+async def export_ldr(
+    bricks: str = Form(...),
+    title: str = Form(default="LegoGen Model"),
+):
+    """Export a brick-coordinate string to LDraw (.ldr) format.
+
+    Accepts the ``bricks`` field from a prior ``/generate-bricks`` response and
+    returns a downloadable ``.ldr`` file.
+    """
+    from backend.brick.ldraw import bricks_text_to_ldr
+
+    try:
+        ldr_content = bricks_text_to_ldr(bricks, title=title)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid brick data: {exc}") from exc
+
+    return PlainTextResponse(
+        content=ldr_content,
+        media_type="application/x-ldraw",
+        headers={"Content-Disposition": f'attachment; filename="{title}.ldr"'},
+    )
