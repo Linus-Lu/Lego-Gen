@@ -165,90 +165,29 @@ def evaluate_stage1(prediction: str, reference: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Stage 2 Metrics: LEGO JSON Quality
+#  Stage 2 Metrics: Brick Coordinate Quality
 # ═══════════════════════════════════════════════════════════════════════
 
-def evaluate_stage2(pred: dict, ref: dict, known_part_ids: set | None = None) -> dict:
-    """Full Stage 2 evaluation for a single sample."""
-    from backend.training.utils import (
-        compute_color_f1,
-        compute_parts_f1,
-        compute_structural_coherence,
-        compute_build_feasibility,
-        compute_part_realism,
-    )
+def evaluate_brick_output(result: dict) -> dict:
+    """Evaluate a brick-coordinate pipeline result.
 
-    metrics = {}
+    Expects keys: bricks, brick_count, stable, metadata.
+    """
+    brick_count = result.get("brick_count", 0)
+    stable = result.get("stable", False)
 
-    # ── JSON validity ──────────────────────────────────────────────────
-    metrics["valid_json"] = 1.0 if isinstance(pred, dict) and len(pred) > 0 else 0.0
-
-    # ── Required fields ────────────────────────────────────────────────
-    required = [
-        "set_id", "object", "category", "subcategory", "complexity",
-        "total_parts", "dominant_colors", "dimensions_estimate",
-        "subassemblies", "build_hints",
-    ]
-    metrics["fields_present"] = sum(1 for f in required if f in pred) / len(required)
-
-    # ── Field accuracy ─────────────────────────────────────────────────
-    for field in ["category", "subcategory", "complexity"]:
-        metrics[f"{field}_accuracy"] = 1.0 if pred.get(field) == ref.get(field) else 0.0
-
-    # ── Color F1 ───────────────────────────────────────────────────────
-    metrics["color_f1"] = compute_color_f1(
-        pred.get("dominant_colors", []),
-        ref.get("dominant_colors", []),
-    )
-
-    # ── Parts F1 ───────────────────────────────────────────────────────
-    pred_parts = [p for sa in pred.get("subassemblies", []) for p in sa.get("parts", [])]
-    ref_parts = [p for sa in ref.get("subassemblies", []) for p in sa.get("parts", [])]
-    metrics["parts_f1"] = compute_parts_f1(pred_parts, ref_parts)
-
-    # ── Part count accuracy ────────────────────────────────────────────
-    pred_total = pred.get("total_parts", 0)
-    ref_total = ref.get("total_parts", 1)
-    metrics["part_count_error_pct"] = abs(pred_total - ref_total) / max(ref_total, 1) * 100
-    metrics["part_count_within_10pct"] = 1.0 if metrics["part_count_error_pct"] <= 10 else 0.0
-
-    # ── Structural coherence ───────────────────────────────────────────
-    metrics["structural_coherence"] = compute_structural_coherence(pred)
-
-    # ── Build feasibility ──────────────────────────────────────────────
-    metrics["build_feasibility"] = compute_build_feasibility(pred)
-
-    # ── Part realism (if catalog available) ────────────────────────────
-    if known_part_ids:
-        metrics["part_realism"] = compute_part_realism(pred, known_part_ids)
-    else:
-        metrics["part_realism"] = float("nan")
-
-    # ── Subassembly statistics ─────────────────────────────────────────
-    subs = pred.get("subassemblies", [])
-    metrics["subassembly_count"] = len(subs)
-    metrics["avg_parts_per_sub"] = (
-        np.mean([len(sa.get("parts", [])) for sa in subs]) if subs else 0.0
-    )
-
-    # ── Layer-based format compliance ──────────────────────────────────
-    layer_names = [sa.get("name", "") for sa in subs]
-    layer_pattern_count = sum(1 for n in layer_names if n.startswith("layer_"))
-    metrics["layer_format_compliance"] = layer_pattern_count / max(len(subs), 1)
-
-    # ── Overall weighted score ─────────────────────────────────────────
+    metrics = {
+        "valid_output": 1.0 if brick_count > 0 else 0.0,
+        "brick_count": brick_count,
+        "stable": 1.0 if stable else 0.0,
+        "rejections": result.get("metadata", {}).get("rejections", 0),
+        "rollbacks": result.get("metadata", {}).get("rollbacks", 0),
+    }
     metrics["overall_stage2"] = (
-        metrics["valid_json"] * 0.10 +
-        metrics["fields_present"] * 0.10 +
-        metrics["category_accuracy"] * 0.10 +
-        metrics["complexity_accuracy"] * 0.05 +
-        metrics["color_f1"] * 0.15 +
-        metrics["parts_f1"] * 0.20 +
-        metrics["structural_coherence"] * 0.15 +
-        metrics["build_feasibility"] * 0.10 +
-        metrics["layer_format_compliance"] * 0.05
+        metrics["valid_output"] * 0.3 +
+        metrics["stable"] * 0.5 +
+        (min(brick_count, 50) / 50) * 0.2
     )
-
     return metrics
 
 
@@ -532,29 +471,40 @@ def main():
                 result = pipeline.generate_brick_build_from_image(image)
 
             latency = (time.time() - t0) * 1000
-            pred = result.get("description", {})
 
-            # ── Stage 1 metrics (if two-stage and description available)
-            if not args.stage2_only and hasattr(pipeline, "last_stage1_description"):
-                stage1_desc = getattr(pipeline, "last_stage1_description", "")
-                # Build reference description from label
+            # ── Stage 1 metrics (if two-stage and caption available)
+            caption = result.get("caption", "")
+            if not args.stage2_only and caption:
                 ref_desc = f"{ref.get('object', '')}. "
                 ref_colors = ref.get("dominant_colors", [])
                 if ref_colors:
                     ref_desc += f"Dominant colors: {', '.join(ref_colors)}. "
-                s1 = evaluate_stage1(stage1_desc, ref_desc)
+                s1 = evaluate_stage1(caption, ref_desc)
                 s1["set_id"] = set_id
                 stage1_metrics.append(s1)
 
-            # ── Stage 2 metrics
-            s2 = evaluate_stage2(pred, ref, known_part_ids)
+            # ── Stage 2 metrics (brick-level) ─────────────────────────
+            brick_count = result.get("brick_count", 0)
+            stable = result.get("stable", False)
+            s2 = {
+                "valid_output": 1.0 if brick_count > 0 else 0.0,
+                "brick_count": brick_count,
+                "stable": 1.0 if stable else 0.0,
+                "rejections": result.get("metadata", {}).get("rejections", 0),
+                "rollbacks": result.get("metadata", {}).get("rollbacks", 0),
+            }
+            s2["overall_stage2"] = (
+                s2["valid_output"] * 0.3 +
+                s2["stable"] * 0.5 +
+                (min(brick_count, 50) / 50) * 0.2  # reward reasonable brick count
+            )
             s2["set_id"] = set_id
             s2["latency_ms"] = latency
             stage2_metrics.append(s2)
 
             # ── Stability (end-to-end)
             if not args.no_stability:
-                stab = evaluate_stability(pred)
+                stab = evaluate_stability(result)
                 stab["set_id"] = set_id
                 stab["latency_ms"] = latency
                 e2e_metrics.append(stab)
@@ -562,9 +512,8 @@ def main():
             # Print inline summary
             print(
                 f"overall={s2['overall_stage2']:.0%} "
-                f"color_f1={s2['color_f1']:.0%} "
-                f"parts_f1={s2['parts_f1']:.0%} "
-                f"struct={s2['structural_coherence']:.0%} "
+                f"bricks={brick_count} "
+                f"stable={'Y' if stable else 'N'} "
                 f"{latency:.0f}ms"
             )
 
@@ -589,12 +538,9 @@ def main():
     # Stage 2 summary
     if stage2_metrics:
         s2_summary = aggregate_metrics(stage2_metrics)
-        print_poster_table(s2_summary, "Stage 2: Text -> LEGO JSON")
+        print_poster_table(s2_summary, "Stage 2: Text -> Brick Coordinates")
         print_bar_chart(s2_summary, [
-            "valid_json", "fields_present", "category_accuracy",
-            "color_f1", "parts_f1", "structural_coherence",
-            "build_feasibility", "layer_format_compliance",
-            "overall_stage2",
+            "valid_output", "stable", "overall_stage2",
         ], "Stage 2 Quality")
 
     # End-to-end summary
@@ -610,14 +556,8 @@ def main():
         print(f"{'=' * 70}")
 
         highlights = {
-            "JSON Validity Rate": s2s.get("valid_json", {}).get("mean", 0),
-            "Schema Compliance": s2s.get("fields_present", {}).get("mean", 0),
-            "Category Accuracy": s2s.get("category_accuracy", {}).get("mean", 0),
-            "Color F1": s2s.get("color_f1", {}).get("mean", 0),
-            "Parts F1": s2s.get("parts_f1", {}).get("mean", 0),
-            "Structural Coherence": s2s.get("structural_coherence", {}).get("mean", 0),
-            "Build Feasibility": s2s.get("build_feasibility", {}).get("mean", 0),
-            "Layer Format Compliance": s2s.get("layer_format_compliance", {}).get("mean", 0),
+            "Valid Output Rate": s2s.get("valid_output", {}).get("mean", 0),
+            "Stability Rate": s2s.get("stable", {}).get("mean", 0),
             "Overall Score": s2s.get("overall_stage2", {}).get("mean", 0),
         }
 
@@ -678,7 +618,7 @@ def main():
             save_latex_table(
                 aggregate_metrics(stage2_metrics),
                 output_dir / "stage2_table.tex",
-                "Stage 2: Text to LEGO JSON Quality",
+                "Stage 2: Text to Brick Coordinates Quality",
             )
 
     print(f"\n  All results saved to: {output_dir}/")

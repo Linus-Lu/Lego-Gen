@@ -1,7 +1,7 @@
 """Two-phase inference pipeline.
 
-Stage 1: Image → text description (Qwen VL 7B)
-Stage 2: Text → brick coordinates (Qwen 4B)
+Stage 1: Image → text description (Qwen3.5-9B + LoRA)
+Stage 2: Text → brick coordinates (Qwen3.5-4B + LoRA)
 """
 
 import time
@@ -138,6 +138,9 @@ class TwoStagePipeline:
         """Stage 1: Generate a structural description from an image."""
         import torch
         from backend.models.tokenizer import strip_thinking_blocks
+
+        if not self.has_stage1:
+            print("WARNING: Stage 1 adapter not loaded — using default adapter for image description")
 
         if self.has_stage1:
             self.wrapper.set_adapter("stage1")
