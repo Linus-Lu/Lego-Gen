@@ -11,19 +11,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 try:
     import aiosqlite  # noqa: F401
 
+    from backend.storage.gallery_db import (
+        create_build,
+        get_build,
+        init_db,
+        list_builds,
+        update_star,
+    )
+
     _AIOSQLITE = True
 except ImportError:
     _AIOSQLITE = False
 
 pytestmark = pytest.mark.skipif(not _AIOSQLITE, reason="aiosqlite not installed")
-
-from backend.storage.gallery_db import (
-    create_build,
-    get_build,
-    init_db,
-    list_builds,
-    update_star,
-)
 
 
 def _run(coro):

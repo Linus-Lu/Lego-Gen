@@ -19,11 +19,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # even when torch is not installed.
 _BRICK_RE = re.compile(r"(\d+)x(\d+) \((\d+),(\d+),(\d+)\) #([0-9A-Fa-f]{6})")
 
-# Try importing the full module for generate-loop tests
+# Try importing the full module for generate-loop and constants tests
 try:
     import torch
 
-    from backend.inference.brick_pipeline import BrickPipeline
+    from backend.inference.brick_pipeline import (
+        BASE_TEMPERATURE,
+        MAX_BRICKS,
+        MAX_REJECTIONS,
+        MAX_ROLLBACKS,
+        MAX_TEMPERATURE,
+        TEMP_INCREMENT,
+        BrickPipeline,
+    )
 
     _TORCH_AVAILABLE = True
 except (ImportError, FileNotFoundError, OSError):
@@ -58,20 +66,30 @@ class TestBrickRegex:
         assert _BRICK_RE.fullmatch("1x1 (0,0,0) #abcdef") is not None
 
 
-# ── TestConstants (no torch needed) ──────────────────────────────────
+# ── TestConstants (requires module import) ───────────────────────────
 
 
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch or colors.json unavailable")
 class TestConstants:
-    """Verify expected constant values are consistent with brick_pipeline.py."""
+    """Verify brick_pipeline constants haven't drifted from expected values."""
 
-    def test_expected_values(self):
-        # These are the values defined in brick_pipeline.py lines 20-25
-        assert 500 == 500  # MAX_BRICKS
-        assert 500 == 500  # MAX_REJECTIONS
-        assert 100 == 100  # MAX_ROLLBACKS
-        assert 0.6 == pytest.approx(0.6)   # BASE_TEMPERATURE
-        assert 0.01 == pytest.approx(0.01)  # TEMP_INCREMENT
-        assert 2.0 == pytest.approx(2.0)   # MAX_TEMPERATURE
+    def test_max_bricks(self):
+        assert MAX_BRICKS == 500
+
+    def test_max_rejections(self):
+        assert MAX_REJECTIONS == 500
+
+    def test_max_rollbacks(self):
+        assert MAX_ROLLBACKS == 100
+
+    def test_base_temperature(self):
+        assert BASE_TEMPERATURE == pytest.approx(0.6)
+
+    def test_temp_increment(self):
+        assert TEMP_INCREMENT == pytest.approx(0.01)
+
+    def test_max_temperature(self):
+        assert MAX_TEMPERATURE == pytest.approx(2.0)
 
 
 # ── TestGenerateLoop (requires torch) ────────────────────────────────
