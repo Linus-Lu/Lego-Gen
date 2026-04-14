@@ -90,6 +90,16 @@ MAX_GRAD_NORM = 1.0
 LOGGING_STEPS = 10
 SAVE_TOTAL_LIMIT = 2
 
+# ── Prompt Caching ────────────────────────────────────────────────────
+CACHE_ENABLED = os.environ.get("LEGOGEN_CACHE_ENABLED", "1") == "1"
+CACHE_KV_PREFIX_ENABLED = True       # Layer 1: KV-cache prefix reuse
+CACHE_RESPONSE_ENABLED = True        # Layer 2: Full response caching
+CACHE_RESPONSE_FOR_SAMPLING = False  # When False (default), skip Layer 2 cache when do_sample=True
+                                     # Set True to cache first result even with sampling
+CACHE_TOKENIZATION_ENABLED = True    # Layer 3: Tokenization caching
+CACHE_RESPONSE_MAX_SIZE = 256        # Max cached responses
+CACHE_RESPONSE_TTL_SECONDS = 3600    # 1 hour TTL
+
 # ── Inference ──────────────────────────────────────────────────────────
 MAX_NEW_TOKENS = 2048
 TEMPERATURE = 0.7

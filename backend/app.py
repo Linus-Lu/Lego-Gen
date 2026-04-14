@@ -54,4 +54,9 @@ app.include_router(generate_router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    from backend.inference.pipeline import get_pipeline
+    pipeline = get_pipeline()
+    result = {"status": "ok"}
+    if hasattr(pipeline, "cache_stats"):
+        result["cache"] = pipeline.cache_stats()
+    return result
