@@ -163,11 +163,8 @@ class TestKVPrefixCache:
         cache = KVPrefixCache()
         assert not cache.is_ready
 
-    def test_returns_none_before_warmup(self):
+    def test_stage1_returns_none_before_warmup(self):
         cache = KVPrefixCache()
-        kv, length = cache.get_vision_prefix()
-        assert kv is None
-        assert length == 0
-        kv, length = cache.get_planner_prefix()
+        kv, length = cache.get_stage1_prefix()
         assert kv is None
         assert length == 0

@@ -1,26 +1,18 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
 import Header from '../components/Header';
 import UploadPanel from '../components/UploadPanel';
-import StepList from '../components/StepList';
-import StepDetail from '../components/StepDetail';
-import ColorLegend from '../components/ColorLegend';
-import LegoViewer from '../components/LegoViewer';
-import ValidationPanel from '../components/ValidationPanel';
-import { generateBuild, generateBuildFromText, generateBuildStream, createGalleryBuild } from '../api/legogen';
-import type { GenerateResponse, StreamProgress } from '../api/legogen';
+import BrickCoordViewer from '../components/BrickCoordViewer';
+import { generateBricks, parseBrickString, bricksToSteps } from '../api/legogen';
+import type { BrickResponse, BrickCoord } from '../api/legogen';
 
 interface Message {
   role: 'user' | 'assistant';
   content: React.ReactNode;
-  type?: 'text' | 'manual-result' | 'error';
+  type?: 'text' | 'brick-result' | 'error';
 }
 
 const BuildSession: React.FC = () => {
-  const navigate = useNavigate();
   const [input, setInput] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -28,33 +20,30 @@ const BuildSession: React.FC = () => {
       content: (
         <div className="space-y-2">
           <p>Welcome to <span className="text-gradient font-semibold">LegoGen</span>.</p>
-          <p className="text-gray-400">Upload an image of a LEGO set or describe what you'd like to build, and I'll generate step-by-step instructions with a 3D preview.</p>
+          <p className="text-gray-400">Upload an image or describe what you'd like to build. I'll generate a 3D LEGO model with brick coordinates.</p>
         </div>
       ),
     }
   ]);
   const [isLoading, setIsLoading] = useState(false);
-  const [loadingStage, setLoadingStage] = useState<string>('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const [buildResult, setBuildResult] = useState<GenerateResponse | null>(null);
+  const [brickResult, setBrickResult] = useState<BrickResponse | null>(null);
+  const [bricks, setBricks] = useState<BrickCoord[]>([]);
   const [currentStep, setCurrentStep] = useState(1);
-  const [activeTab, setActiveTab] = useState<'steps' | 'validation'>('steps');
+
+  const { steps, zLevels } = useMemo(
+    () => bricksToSteps(bricks),
+    [bricks],
+  );
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  // Only scroll when messages change, not on buildResult tab/step changes
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
-
-  // Memoize the flattened parts list to avoid re-creating on every render
-  const allParts = useMemo(
-    () => buildResult?.steps.flatMap((s) => s.parts) ?? [],
-    [buildResult?.steps],
-  );
 
   const handleSendMessage = async () => {
     if ((!input.trim() && !selectedFile) || isLoading) return;
@@ -83,90 +72,48 @@ const BuildSession: React.FC = () => {
     setIsLoading(true);
 
     try {
-      let result: GenerateResponse;
-      const handleProgress = (progress: StreamProgress) => {
-        setLoadingStage(progress.message);
-      };
-
-      // Try streaming endpoint first, fall back to non-streaming
-      try {
-        result = await generateBuildStream(
-          handleProgress,
-          fileToSend || undefined,
-          textToSend || undefined,
-        );
-      } catch {
-        // Fall back to non-streaming API
-        if (fileToSend) {
-          result = await generateBuild(fileToSend, textToSend || undefined);
-        } else {
-          result = await generateBuildFromText(textToSend);
-        }
-      }
-      setBuildResult(result);
-      setSaved(false);
+      const result = await generateBricks(fileToSend || undefined, textToSend || undefined);
+      setBrickResult(result);
+      const parsed = parseBrickString(result.bricks);
+      setBricks(parsed);
       setCurrentStep(1);
 
-      const desc = result.description;
-      const hasDescription = desc && desc.object;
+      // Compute layers from parsed bricks directly to avoid stale useMemo state
+      const { steps: freshSteps } = bricksToSteps(parsed);
+      const layerCount = freshSteps.length;
 
       const resultMessage: Message = {
         role: 'assistant',
-        type: 'manual-result',
-        content: hasDescription ? (
+        type: 'brick-result',
+        content: (
           <div className="w-full animate-fade-in space-y-3">
             <p className="font-medium">
-              Here's your build plan for{' '}
-              <span className="text-gradient-warm font-bold">{desc.object}</span>
+              Built a LEGO model: <span className="text-gradient-warm font-bold">{result.caption}</span>
             </p>
             <div className="flex flex-wrap items-center gap-2 text-xs">
               <span className="px-2.5 py-1 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-300">
-                {desc.total_parts ?? 0} parts
+                {result.brick_count} bricks
+              </span>
+              <span className={`px-2.5 py-1 rounded-lg border ${
+                result.stable
+                  ? 'bg-green-500/10 border-green-500/20 text-green-300'
+                  : 'bg-yellow-500/10 border-yellow-500/20 text-yellow-300'
+              }`}>
+                {result.stable ? 'Stable' : 'Unstable'}
               </span>
               <span className="px-2.5 py-1 rounded-lg bg-purple-500/10 border border-purple-500/20 text-purple-300">
-                {desc.complexity ?? 'unknown'}
+                {layerCount} layers
               </span>
-              <span className="px-2.5 py-1 rounded-lg bg-green-500/10 border border-green-500/20 text-green-300">
-                {result.steps.length} steps
-              </span>
-              {result.validation && (
-                <span className={`px-2.5 py-1 rounded-lg border ${
-                  result.validation.score >= 80
-                    ? 'bg-green-500/10 border-green-500/20 text-green-300'
-                    : result.validation.score >= 50
-                    ? 'bg-yellow-500/10 border-yellow-500/20 text-yellow-300'
-                    : 'bg-red-500/10 border-red-500/20 text-red-300'
-                }`}>
-                  Stability: {result.validation.score}/100
-                </span>
-              )}
               <span className="text-gray-600 ml-1">
                 {result.metadata.generation_time_ms}ms
               </span>
             </div>
-            {(desc.build_hints?.length ?? 0) > 0 && (
-              <div className="text-xs text-gray-500 leading-relaxed">
-                {desc.build_hints.join(' · ')}
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="w-full animate-fade-in space-y-2">
-            <p className="font-medium text-yellow-400">Generation produced an incomplete result</p>
-            <p className="text-sm text-gray-400">
-              The model output could not be parsed into a valid build description.
-              {result.metadata.errors.length > 0 && (
-                <span className="block mt-1 text-xs text-gray-500">
-                  {result.metadata.errors.slice(0, 3).join('; ')}
-                </span>
-              )}
-            </p>
           </div>
         ),
       };
       setMessages((prev) => [...prev, resultMessage]);
     } catch (err: unknown) {
-      const errorText = err instanceof Error ? err.message : 'Failed to generate instructions.';
+      const errorText = err instanceof Error ? err.message : 'Failed to generate model.';
       const errorMessage: Message = {
         role: 'assistant',
         type: 'error',
@@ -185,7 +132,6 @@ const BuildSession: React.FC = () => {
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
-      setLoadingStage('');
     }
   };
 
@@ -212,7 +158,6 @@ const BuildSession: React.FC = () => {
               }`}
             >
               <div className="max-w-4xl mx-auto flex gap-4">
-                {/* Avatar */}
                 <div
                   className={`w-8 h-8 flex-shrink-0 rounded-lg flex items-center justify-center text-sm font-bold shadow-lg ${
                     msg.role === 'assistant'
@@ -222,8 +167,6 @@ const BuildSession: React.FC = () => {
                 >
                   {msg.role === 'assistant' ? 'L' : 'U'}
                 </div>
-
-                {/* Content */}
                 <div className="relative flex-grow min-w-0 text-[15px] leading-7 text-gray-200 pt-0.5">
                   {msg.content}
                 </div>
@@ -231,124 +174,42 @@ const BuildSession: React.FC = () => {
             </div>
           ))}
 
-          {/* Build viewer panel */}
-          {buildResult && !isLoading && buildResult.steps.length > 0 && (
+          {/* 3D Brick Viewer */}
+          {bricks.length > 0 && !isLoading && (
             <div className="w-full py-4 px-4 md:px-6 animate-scale-in">
               <div className="max-w-6xl mx-auto">
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 h-[580px]">
-                  {/* 3D Viewer */}
                   <div className="lg:col-span-2 glass rounded-2xl overflow-hidden">
-                    <LegoViewer steps={buildResult.steps} currentStep={currentStep} />
+                    <BrickCoordViewer bricks={bricks} zLevels={zLevels} currentStep={currentStep} />
                   </div>
 
-                  {/* Side panel */}
+                  {/* Layer steps sidebar */}
                   <div className="flex flex-col gap-2 glass rounded-2xl p-3 overflow-hidden">
-                    {/* Tab bar */}
-                    <div className="flex gap-1 border-b border-white/5 pb-2 flex-shrink-0" role="tablist" aria-label="Build details">
-                      <button
-                        role="tab"
-                        aria-selected={activeTab === 'steps'}
-                        aria-controls="panel-steps"
-                        onClick={() => setActiveTab('steps')}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                          activeTab === 'steps'
-                            ? 'bg-blue-500/15 text-blue-300 border border-blue-500/20'
-                            : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'
-                        }`}
-                      >
-                        Steps
-                      </button>
-                      <button
-                        role="tab"
-                        aria-selected={activeTab === 'validation'}
-                        aria-controls="panel-validation"
-                        onClick={() => setActiveTab('validation')}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 ${
-                          activeTab === 'validation'
-                            ? 'bg-blue-500/15 text-blue-300 border border-blue-500/20'
-                            : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'
-                        }`}
-                      >
-                        Validation
-                        {buildResult.validation && (
-                          <span
-                            className={`inline-block w-2 h-2 rounded-full ${
-                              buildResult.validation.score >= 80 ? 'bg-green-400' :
-                              buildResult.validation.score >= 50 ? 'bg-yellow-400' : 'bg-red-400'
-                            }`}
-                            aria-label={`Score: ${buildResult.validation.score}`}
-                          />
-                        )}
-                      </button>
+                    <h3 className="text-sm font-medium text-gray-300 px-2">Build Layers</h3>
+                    <div className="flex-grow overflow-y-auto min-h-0">
+                      {steps.map((step) => (
+                        <button
+                          key={step.step_number}
+                          onClick={() => setCurrentStep(step.step_number)}
+                          className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${
+                            currentStep === step.step_number
+                              ? 'bg-blue-500/15 text-blue-300 border border-blue-500/20'
+                              : 'text-gray-400 hover:text-gray-200 hover:bg-white/5'
+                          }`}
+                        >
+                          <div className="font-medium">{step.title}</div>
+                          <div className="text-xs opacity-70">{step.instruction}</div>
+                        </button>
+                      ))}
                     </div>
 
-                    {activeTab === 'steps' ? (
-                      <div id="panel-steps" role="tabpanel" aria-labelledby="tab-steps" className="contents">
-                        <div className="flex-grow overflow-y-auto min-h-0">
-                          <StepList
-                            steps={buildResult.steps}
-                            currentStep={currentStep}
-                            onStepSelect={setCurrentStep}
-                          />
-                        </div>
-                        <div className="border-t border-white/5 max-h-[200px] overflow-y-auto">
-                          <StepDetail step={buildResult.steps[currentStep - 1] ?? null} />
-                        </div>
-                        <ColorLegend
-                          dominantColors={buildResult.description.dominant_colors ?? []}
-                          allParts={allParts}
-                        />
-                      </div>
-                    ) : (
-                      <div id="panel-validation" role="tabpanel" aria-labelledby="tab-validation" className="flex-grow overflow-y-auto min-h-0">
-                        <ValidationPanel validation={buildResult.validation} />
+                    {brickResult && (
+                      <div className="border-t border-white/5 pt-2 px-2 text-xs text-gray-500">
+                        <div>Rejections: {brickResult.metadata.rejections}</div>
+                        <div>Rollbacks: {brickResult.metadata.rollbacks}</div>
                       </div>
                     )}
                   </div>
-                </div>
-
-                {/* Action buttons */}
-                <div className="flex gap-2 mt-3">
-                  <button
-                    onClick={async () => {
-                      if (!buildResult || saving) return;
-                      setSaving(true);
-                      try {
-                        // Capture thumbnail from canvas
-                        const canvas = document.querySelector('canvas');
-                        const thumbnail = canvas ? canvas.toDataURL('image/png').split(',')[1] : '';
-                        await createGalleryBuild({
-                          title: buildResult.description?.object ?? 'Untitled Build',
-                          description_json: JSON.stringify({
-                            ...buildResult.description,
-                            steps: buildResult.steps,
-                          }),
-                          thumbnail_b64: thumbnail,
-                        });
-                        setSaved(true);
-                      } catch {
-                        // silent
-                      } finally {
-                        setSaving(false);
-                      }
-                    }}
-                    disabled={saving || saved}
-                    className={`px-4 py-2 rounded-xl text-xs font-medium transition ${
-                      saved
-                        ? 'bg-green-500/15 text-green-300 border border-green-500/20'
-                        : 'bg-white/5 hover:bg-white/10 text-gray-300'
-                    }`}
-                  >
-                    {saved ? 'Saved!' : saving ? 'Saving...' : 'Save to Gallery'}
-                  </button>
-                  <button
-                    onClick={() => {
-                      navigate('/guide/new', { state: { build: buildResult } });
-                    }}
-                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-medium text-white transition"
-                  >
-                    Start Building
-                  </button>
                 </div>
               </div>
             </div>
@@ -365,7 +226,7 @@ const BuildSession: React.FC = () => {
                   <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" />
                   <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }} />
                   <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }} />
-                  <span className="text-xs text-gray-500 ml-2">{loadingStage || 'Analyzing and generating instructions...'}</span>
+                  <span className="text-xs text-gray-500 ml-2">Generating LEGO model...</span>
                 </div>
               </div>
             </div>
@@ -377,7 +238,6 @@ const BuildSession: React.FC = () => {
       {/* Input area */}
       <div className="fixed bottom-0 left-0 right-0 bg-gradient-to-t from-gray-950 via-gray-950/95 to-transparent pt-12 pb-5 px-4 pointer-events-none">
         <div className="max-w-3xl mx-auto relative pointer-events-auto">
-          {/* File preview */}
           {selectedFile && (
             <div className="absolute -top-10 left-0 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg glass text-xs text-gray-200 animate-slide-up">
               <svg className="w-3.5 h-3.5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.41a2.25 2.25 0 013.182 0l2.909 2.91M3.75 21h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v13.5A1.5 1.5 0 003.75 21z" /></svg>
@@ -420,7 +280,7 @@ const BuildSession: React.FC = () => {
           </div>
 
           <p className="text-center text-[11px] text-gray-600 mt-2">
-            LegoGen may produce inaccurate instructions. Verify steps before building.
+            LegoGen may produce inaccurate models. Verify before building.
           </p>
         </div>
       </div>

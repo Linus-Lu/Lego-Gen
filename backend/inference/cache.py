@@ -9,10 +9,6 @@ import hashlib
 import threading
 import time
 from collections import OrderedDict
-from pathlib import Path
-
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 
 # ── Layer 1: KV-Cache Prefix Caching ─────────────────────────────────
@@ -23,72 +19,16 @@ class KVPrefixCache:
 
     After warmup, each inference request clones the cached prefix and passes
     it as past_key_values to model.generate(), skipping redundant computation
-    of the ~100 system-prompt tokens.
+    of the system-prompt tokens.
     """
 
     def __init__(self):
-        self._vision_cache = None      # DynamicCache for SYSTEM_PROMPT
-        self._planner_cache = None     # DynamicCache for PLANNER_SYSTEM_PROMPT
-        self._vision_prefix_len: int = 0
-        self._planner_prefix_len: int = 0
+        self._stage1_cache = None
+        self._stage1_prefix_len: int = 0
         self._warmed_up = False
 
-    def warmup(self, model, processor):
-        """Run forward pass on system prompt tokens to populate KV caches.
-
-        Must be called once after model loading, before any inference.
-        """
-        import torch
-        from backend.models.tokenizer import (
-            SYSTEM_PROMPT,
-            PLANNER_SYSTEM_PROMPT,
-        )
-
-        device = next(model.parameters()).device
-
-        # --- Vision prefix (SYSTEM_PROMPT) ---
-        vision_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        vision_text = processor.apply_chat_template(
-            vision_messages, tokenize=False, add_generation_prompt=False,
-        )
-        vision_inputs = processor(
-            text=[vision_text], return_tensors="pt",
-        ).to(device)
-
-        with torch.inference_mode():
-            vision_out = model(
-                **vision_inputs,
-                use_cache=True,
-            )
-        self._vision_cache = vision_out.past_key_values
-        self._vision_prefix_len = vision_inputs["input_ids"].shape[1]
-
-        # --- Planner prefix (PLANNER_SYSTEM_PROMPT) ---
-        planner_messages = [{"role": "system", "content": PLANNER_SYSTEM_PROMPT}]
-        planner_text = processor.apply_chat_template(
-            planner_messages, tokenize=False, add_generation_prompt=False,
-        )
-        planner_inputs = processor(
-            text=[planner_text], return_tensors="pt",
-        ).to(device)
-
-        with torch.inference_mode():
-            planner_out = model(
-                **planner_inputs,
-                use_cache=True,
-            )
-        self._planner_cache = planner_out.past_key_values
-        self._planner_prefix_len = planner_inputs["input_ids"].shape[1]
-
-        self._warmed_up = True
-        print(
-            f"[cache] KV prefix warmup complete: "
-            f"vision={self._vision_prefix_len} tokens, "
-            f"planner={self._planner_prefix_len} tokens"
-        )
-
     def warmup_stage1(self, model, processor, system_prompt: str):
-        """Warm up a KV prefix for the Stage 1 system prompt."""
+        """Run forward pass on Stage 1 system prompt to populate KV cache."""
         import torch
 
         device = next(model.parameters()).device
@@ -102,15 +42,14 @@ class KVPrefixCache:
             out = model(**inputs, use_cache=True)
         self._stage1_cache = out.past_key_values
         self._stage1_prefix_len = inputs["input_ids"].shape[1]
+        self._warmed_up = True
         print(f"[cache] Stage 1 KV prefix warmup: {self._stage1_prefix_len} tokens")
 
     def get_stage1_prefix(self):
         """Return (cloned DynamicCache, prefix_length) for Stage 1 path."""
-        cache = getattr(self, "_stage1_cache", None)
-        if cache is None:
+        if self._stage1_cache is None:
             return None, 0
-        prefix_len = getattr(self, "_stage1_prefix_len", 0)
-        return self._clone_kv_cache(cache), prefix_len
+        return self._clone_kv_cache(self._stage1_cache), self._stage1_prefix_len
 
     @property
     def is_ready(self) -> bool:
@@ -135,18 +74,6 @@ class KVPrefixCache:
             )
         return cloned
 
-    def get_vision_prefix(self):
-        """Return (cloned DynamicCache, prefix_length) for vision path."""
-        if not self._warmed_up:
-            return None, 0
-        return self._clone_kv_cache(self._vision_cache), self._vision_prefix_len
-
-    def get_planner_prefix(self):
-        """Return (cloned DynamicCache, prefix_length) for planner path."""
-        if not self._warmed_up:
-            return None, 0
-        return self._clone_kv_cache(self._planner_cache), self._planner_prefix_len
-
 
 # ── Layer 2: Response Caching ─────────────────────────────────────────
 
@@ -154,7 +81,7 @@ class KVPrefixCache:
 class _CacheEntry:
     __slots__ = ("value", "created_at")
 
-    def __init__(self, value: dict):
+    def __init__(self, value):
         self.value = value
         self.created_at = time.monotonic()
 
@@ -181,30 +108,27 @@ class ResponseCache:
     def make_key_image(image_bytes: bytes) -> str:
         return hashlib.sha256(image_bytes).hexdigest()
 
-    def get(self, key: str) -> dict | None:
+    def get(self, key: str):
         with self._lock:
             entry = self._cache.get(key)
             if entry is None:
                 self._misses += 1
                 return None
-            # Check TTL
             if (time.monotonic() - entry.created_at) > self._ttl:
                 del self._cache[key]
                 self._misses += 1
                 return None
-            # Move to end (most recently used)
             self._cache.move_to_end(key)
             self._hits += 1
             return entry.value
 
-    def put(self, key: str, value: dict):
+    def put(self, key: str, value):
         with self._lock:
             if key in self._cache:
                 self._cache.move_to_end(key)
                 self._cache[key] = _CacheEntry(value)
             else:
                 self._cache[key] = _CacheEntry(value)
-                # Evict LRU if over capacity
                 while len(self._cache) > self._max_size:
                     self._cache.popitem(last=False)
 

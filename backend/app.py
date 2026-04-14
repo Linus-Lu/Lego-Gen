@@ -10,16 +10,12 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backend.api.routes_generate import router as generate_router
-from backend.api.routes_validate import router as validate_router
-from backend.api.routes_gallery import router as gallery_router
-from backend.storage import gallery_db
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle. Preload model so first request isn't slow."""
     import asyncio, os
-    await gallery_db.init_db()
     if os.environ.get("LEGOGEN_DEV", "1") != "1":
         print("LEGOGen API starting — preloading model...")
         loop = asyncio.get_event_loop()
@@ -39,8 +35,8 @@ def _preload_model():
 
 app = FastAPI(
     title="LEGOGen API",
-    description="Generate LEGO building instructions from images",
-    version="0.1.0",
+    description="Two-phase LEGO model generator: image-to-text + text-to-brick-coordinates",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -54,10 +50,13 @@ app.add_middleware(
 )
 
 app.include_router(generate_router)
-app.include_router(validate_router)
-app.include_router(gallery_router)
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    from backend.inference.pipeline import get_pipeline
+    pipeline = get_pipeline()
+    result = {"status": "ok"}
+    if hasattr(pipeline, "cache_stats"):
+        result["cache"] = pipeline.cache_stats()
+    return result

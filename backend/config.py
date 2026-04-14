@@ -16,7 +16,7 @@ CHECKPOINT_DIR = BACKEND_DIR / "models" / "checkpoints"
 # ── Rebrickable API ────────────────────────────────────────────────────
 REBRICKABLE_API_KEY = os.environ.get("REBRICKABLE_API_KEY", "")
 REBRICKABLE_BASE_URL = "https://rebrickable.com/api/v3/lego"
-REBRICKABLE_RATE_LIMIT = 1.5  # seconds between requests (free tier is strict)
+REBRICKABLE_RATE_LIMIT = 1.5
 
 # ── Dataset ────────────────────────────────────────────────────────────
 MIN_PARTS = 5
@@ -24,81 +24,40 @@ MAX_PARTS = 500
 VAL_RATIO = 0.1
 SPLITS_FILE = DATA_DIR / "splits.json"
 
-# ── Vision Model (backward compat with checked-in adapter) ───────────
-MODEL_NAME = "Qwen/Qwen3-VL-8B-Instruct"
-MAX_SEQ_LENGTH = 4096
-
-# ── Unified Model ─────────────────────────────────────────────────────
-UNIFIED_MODEL_NAME = "Qwen/Qwen3.5-9B"
-
-# ── QLoRA (vision-only — keeps original targets for existing adapter) ─
-LORA_R = 32
-LORA_ALPHA = 64
-LORA_DROPOUT = 0.05
-LORA_TARGET_MODULES = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-QUANTIZATION_BITS = 4
-
-# ── Training ───────────────────────────────────────────────────────────
-LEARNING_RATE = 1e-4       # v1 was 2e-4, lower = more stable convergence
-BATCH_SIZE = 1
-GRADIENT_ACCUMULATION_STEPS = 32
-NUM_EPOCHS = 3             # v2 was 10, reduced for faster iteration
-WARMUP_STEPS = 200         # v1 was 100, longer warmup for lower LR
-WEIGHT_DECAY = 0.01
-MAX_GRAD_NORM = 1.0
-LOGGING_STEPS = 10
-EVAL_STEPS = 200
-SAVE_STEPS = 200
-SAVE_TOTAL_LIMIT = 2  # keep only 2 checkpoints — 100GB volume is tight with 27B model
-
-# ── Planner (text-to-JSON) ─────────────────────────────────────────
-PLANNER_MODEL_NAME = "Qwen/Qwen3.5-9B"
-PLANNER_CHECKPOINT_DIR = BACKEND_DIR / "models" / "checkpoints" / "qwen35-lego-planner-lora"
-PLANNER_MAX_SEQ_LENGTH = 2048
-PLANNER_LEARNING_RATE = 3e-5
-PLANNER_NUM_EPOCHS = 5
-PLANNER_WARMUP_STEPS = 300
-
-# ── Planner QLoRA (Qwen3.5-9B hybrid architecture) ────────────────
-PLANNER_LORA_R = 64
-PLANNER_LORA_ALPHA = 128
-PLANNER_LORA_DROPOUT = 0.05
-PLANNER_LORA_TARGET_MODULES = "all-linear"
-
-# ── Planner Training (RTX 5090 optimized) ─────────────────────────
-PLANNER_BATCH_SIZE = 2
-PLANNER_GRADIENT_ACCUMULATION = 8
-
-# ── StableText2Brick dataset ──────────────────────────────────────
-ST2B_DATASET = "AvaLovelace/StableText2Brick"
-ST2B_CACHE_DIR = DATA_DIR / "st2b_cache"
-ST2B_CONVERTED_DIR = DATA_DIR / "st2b_labels"
-ST2B_PROMPTS_DIR = DATA_DIR / "st2b_prompts"
-PLANNER_PROMPTS_DIR = DATA_DIR / "prompts"
-
-# ── Stage 2: Text → LEGO JSON (Qwen3.5-9B + LoRA) ───────────────────
+# ── Stage 1: Image -> Text Description (Qwen3.5-9B VL + LoRA) ───────
+# Qwen3.5-9B is a vision-language model; the same base serves both stages
+# via adapter swapping.  Stage 1 uses a lightweight LoRA for image→text;
+# Stage 2 uses the default LoRA for text→JSON (used by BrickPipeline's
+# caption input path).
+STAGE1_MODEL_NAME = "Qwen/Qwen3.5-9B"
+UNIFIED_MODEL_NAME = STAGE1_MODEL_NAME  # alias kept for existing imports
 UNIFIED_CHECKPOINT_DIR = CHECKPOINT_DIR / "qwen35-9b-lego-stage2-lora"
-UNIFIED_LEARNING_RATE = 5e-5       # higher LR ok for smaller model
-UNIFIED_NUM_EPOCHS = 3
-UNIFIED_WARMUP_STEPS = 200
-UNIFIED_BATCH_SIZE = 1             # 9B 4-bit fits bs=1 on 32GB (5090) with chunked loss
-UNIFIED_GRADIENT_ACCUMULATION = 32  # effective batch = 32
+UNIFIED_QUANTIZATION_BITS = 4
 UNIFIED_MAX_SEQ_LENGTH = 4096
-UNIFIED_QUANTIZATION_BITS = 4      # 4-bit NF4
-VISION_UPSAMPLE = 10  # upsample vision samples to balance with planner data
 
-# ── Stage 1: Image → Description (lightweight LoRA) ──────────────────
 STAGE1_CHECKPOINT_DIR = CHECKPOINT_DIR / "qwen35-9b-lego-stage1-lora"
 STAGE1_LORA_R = 32
 STAGE1_LORA_ALPHA = 64
 STAGE1_LEARNING_RATE = 5e-5
 STAGE1_NUM_EPOCHS = 3
 STAGE1_WARMUP_STEPS = 100
-STAGE1_BATCH_SIZE = 8             # 9B 4-bit + r=32 LoRA fits bs=8 on 32GB (5090)
-STAGE1_GRADIENT_ACCUMULATION = 1  # effective batch = 8 * N_GPUS (32 on 4x 5090)
-STAGE1_MAX_SEQ_LENGTH = 512       # descriptions are short
+STAGE1_BATCH_SIZE = 8
+STAGE1_GRADIENT_ACCUMULATION = 1
+STAGE1_MAX_SEQ_LENGTH = 512
 
-# ── Stage 2: Brick coordinate model ────────────────────────────────────
+STAGE1_SYSTEM_PROMPT = (
+    "You are a LEGO design assistant. Describe this object's shape, structure, "
+    "colors, and proportions in a way useful for building it with LEGO bricks. "
+    "Focus on geometry and spatial relationships, not materials or artistic style. "
+    "Be concise — one to three sentences."
+)
+
+# ── StableText2Brick dataset ──────────────────────────────────────────
+ST2B_DATASET = "AvaLovelace/StableText2Brick"
+ST2B_CACHE_DIR = DATA_DIR / "st2b_cache"
+ST2B_CONVERTED_DIR = DATA_DIR / "st2b_labels"
+
+# ── Stage 2: Text -> Brick Coordinates (Qwen 4B + LoRA) ──────────────
 BRICK_MODEL_NAME = "Qwen/Qwen3.5-4B"
 BRICK_CHECKPOINT_DIR = CHECKPOINT_DIR / "qwen35-4b-brick-lora"
 BRICK_LEARNING_RATE = 1e-3
@@ -111,14 +70,7 @@ BRICK_LORA_ALPHA = 64
 BRICK_LORA_DROPOUT = 0.05
 BRICK_TRAINING_DATA = DATA_DIR / "brick_training"
 
-STAGE1_SYSTEM_PROMPT = (
-    "You are a LEGO design assistant. Describe this object's shape, structure, "
-    "colors, and proportions in a way useful for building it with LEGO bricks. "
-    "Focus on geometry and spatial relationships, not materials or artistic style. "
-    "Be concise — one to three sentences."
-)
-
-# ── COCO → ST2B category mapping for Stage 1 data ────────────────────
+# ── COCO -> ST2B category mapping for Stage 1 data ────────────────────
 COCO_TO_ST2B_CATEGORY = {
     "chair": "chair",
     "couch": "sofa",
@@ -137,29 +89,27 @@ COCO_TO_ST2B_CATEGORY = {
     "laptop": "laptop",
 }
 
+# ── Training (shared) ─────────────────────────────────────────────────
+WEIGHT_DECAY = 0.01
+MAX_GRAD_NORM = 1.0
+LOGGING_STEPS = 10
+SAVE_TOTAL_LIMIT = 2
+
 # ── Prompt Caching ────────────────────────────────────────────────────
 CACHE_ENABLED = os.environ.get("LEGOGEN_CACHE_ENABLED", "1") == "1"
 CACHE_KV_PREFIX_ENABLED = True       # Layer 1: KV-cache prefix reuse
 CACHE_RESPONSE_ENABLED = True        # Layer 2: Full response caching
 CACHE_RESPONSE_FOR_SAMPLING = False  # When False (default), skip Layer 2 cache when do_sample=True
-                                     # Set True to cache first result even with sampling (returns same output for repeat prompts)
+                                     # Set True to cache first result even with sampling
 CACHE_TOKENIZATION_ENABLED = True    # Layer 3: Tokenization caching
 CACHE_RESPONSE_MAX_SIZE = 256        # Max cached responses
 CACHE_RESPONSE_TTL_SECONDS = 3600    # 1 hour TTL
 
 # ── Inference ──────────────────────────────────────────────────────────
-MAX_NEW_TOKENS = 2048          # increased from 1024 to reduce truncation of complex builds
-NUM_BEAMS = 1
+MAX_NEW_TOKENS = 2048
 TEMPERATURE = 0.7
 TOP_P = 0.9
-INFERENCE_TIMEOUT_SECONDS = 120  # max time for a single inference request
-
-# ── Stability Checker Thresholds ──────────────────────────────────────
-QUANTITY_WARN_THRESHOLD = 50
-QUANTITY_FAIL_THRESHOLD = 200
-SUPPORT_RATIO_WARN = 3.0
-TOP_HEAVY_RATIO = 2.0
-MIN_CANTILEVER_CONNECTIONS = 2
+INFERENCE_TIMEOUT_SECONDS = 120
 
 # ── Device ─────────────────────────────────────────────────────────────
 try:
