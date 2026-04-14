@@ -1,246 +1,117 @@
-"""Tests for FastAPI API routes — generate, validate, gallery, health."""
+"""Tests for FastAPI routes and application endpoints."""
 
 import io
-import json
 import os
-import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-httpx = pytest.importorskip("httpx")
-fastapi = pytest.importorskip("fastapi")
+# Enable dev mode before importing the app so the mock pipeline is used.
+os.environ["LEGOGEN_DEV"] = "1"
 
 from fastapi.testclient import TestClient
-
-
-# ── Fixtures ─────────────────────────────────────────────────────────
+from backend.app import app
 
 
 @pytest.fixture(autouse=True)
-def dev_mode():
-    """Run all API tests in dev mode so MockPipeline is used."""
-    os.environ["LEGOGEN_DEV"] = "1"
+def _reset_pipeline():
+    """Reset pipeline singleton between tests."""
     yield
-    # Reset pipeline singletons so tests are independent
     import backend.inference.pipeline as p
-
-    p._unified_instance = None
-    p._stability_checker = None
+    p._pipeline_instance = None
 
 
-@pytest.fixture
-def client(gallery_db_path):
-    """Create a TestClient with isolated gallery DB.
-
-    gallery_db_path fixture (from conftest.py) patches DB_PATH and DATA_DIR
-    to tmp_path before the app's lifespan starts.
-    """
-    from backend.app import app
-
-    with TestClient(app) as c:
-        yield c
+client = TestClient(app)
 
 
-def _make_png_bytes():
-    """Create a minimal valid PNG image in memory."""
-    try:
-        from PIL import Image
+# ── Health endpoint ──────────────────────────────────────────────────
 
-        img = Image.new("RGB", (64, 64), (255, 0, 0))
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        buf.seek(0)
-        return buf.read()
-    except ImportError:
-        # Fallback: minimal 1x1 red PNG (67 bytes)
-        import base64
-
-        minimal_png = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
-            "nGP4z8BQDwAEgAF/pooBPQAAAABJRU5ErkJggg=="
-        )
-        return minimal_png
+def test_health_endpoint():
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
 
 
-# ── TestHealth ───────────────────────────────────────────────────────
+# ── CORS headers ─────────────────────────────────────────────────────
+
+def test_cors_headers():
+    resp = client.options(
+        "/api/generate-bricks",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert "access-control-allow-origin" in resp.headers
 
 
-class TestHealth:
-    def test_health_ok(self, client):
-        resp = client.get("/health")
-        assert resp.status_code == 200
-        assert resp.json() == {"status": "ok"}
+# ── Generate bricks with prompt ──────────────────────────────────────
+
+def test_generate_with_prompt():
+    resp = client.post(
+        "/api/generate-bricks",
+        data={"prompt": "a small red house"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "bricks" in body
+    assert "caption" in body
+    assert body["caption"] == "a small red house"
+    assert "brick_count" in body
+    assert body["brick_count"] > 0
+    assert "stable" in body
+    assert "metadata" in body
 
 
-# ── TestGenerate ─────────────────────────────────────────────────────
+# ── Generate bricks with image ───────────────────────────────────────
+
+def test_generate_with_image():
+    from PIL import Image
+
+    img = Image.new("RGB", (64, 64), (255, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+
+    resp = client.post(
+        "/api/generate-bricks",
+        files={"image": ("test.png", buf, "image/png")},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "bricks" in body
+    assert body["brick_count"] > 0
 
 
-class TestGenerate:
-    def test_valid_image_returns_200(self, client):
-        png = _make_png_bytes()
-        resp = client.post(
-            "/api/generate",
-            files={"image": ("test.png", png, "image/png")},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "description" in data
-        assert "steps" in data
-        assert "metadata" in data
-        assert "validation" in data
+# ── Error: no input ──────────────────────────────────────────────────
 
-    def test_non_image_mime_returns_400(self, client):
-        resp = client.post(
-            "/api/generate",
-            files={"image": ("test.pdf", b"not an image", "application/pdf")},
-        )
-        assert resp.status_code == 400
-
-    def test_corrupted_image_dev_fallback(self, client):
-        """In dev mode, corrupted image data should trigger fallback."""
-        resp = client.post(
-            "/api/generate",
-            files={"image": ("test.png", b"not valid png data", "image/png")},
-        )
-        # Dev mode creates a dummy image, so should succeed
-        assert resp.status_code == 200
+def test_generate_no_input():
+    resp = client.post("/api/generate-bricks")
+    assert resp.status_code == 400
 
 
-# ── TestGenerateFromText ─────────────────────────────────────────────
+def test_generate_empty_prompt():
+    resp = client.post(
+        "/api/generate-bricks",
+        data={"prompt": "   "},
+    )
+    assert resp.status_code == 400
 
 
-class TestGenerateFromText:
-    def test_valid_prompt(self, client):
-        resp = client.post("/api/generate-from-text", data={"prompt": "a red house"})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "description" in data
-        assert "steps" in data
+# ── Error: invalid content type ──────────────────────────────────────
 
-    def test_empty_prompt_rejected(self, client):
-        resp = client.post("/api/generate-from-text", data={"prompt": ""})
-        assert resp.status_code in (400, 422)  # 400 from handler or 422 from FastAPI validation
-
-    def test_whitespace_only_prompt_returns_400(self, client):
-        resp = client.post("/api/generate-from-text", data={"prompt": "   "})
-        assert resp.status_code == 400
+def test_generate_invalid_content_type():
+    resp = client.post(
+        "/api/generate-bricks",
+        files={"image": ("test.txt", b"not an image", "text/plain")},
+    )
+    assert resp.status_code == 400
 
 
-# ── TestGenerateBricks ───────────────────────────────────────────────
+# ── Error: corrupt image ─────────────────────────────────────────────
 
-
-class TestGenerateBricks:
-    def test_no_input_returns_400(self, client):
-        resp = client.post("/api/generate-bricks", data={"prompt": ""})
-        assert resp.status_code == 400
-
-
-# ── TestValidate ─────────────────────────────────────────────────────
-
-
-class TestValidate:
-    def test_valid_description(self, client, make_desc):
-        desc = make_desc()
-        resp = client.post("/api/validate", json=desc)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "score" in data
-        assert "checks" in data
-        assert "summary" in data
-        assert isinstance(data["score"], int)
-
-    def test_empty_description_low_score(self, client):
-        resp = client.post("/api/validate", json={})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["score"] <= 30  # empty desc should score very low
-
-
-# ── TestGallery ──────────────────────────────────────────────────────
-
-
-class TestGallery:
-    def test_list_empty_initially(self, client):
-        resp = client.get("/api/gallery")
-        assert resp.status_code == 200
-        assert resp.json() == []
-
-    def test_create_build(self, client):
-        payload = {
-            "title": "My House",
-            "description_json": json.dumps(
-                {"category": "City", "complexity": "simple", "total_parts": 30}
-            ),
-            "thumbnail_b64": "",
-        }
-        resp = client.post("/api/gallery", json=payload)
-        assert resp.status_code == 201
-        data = resp.json()
-        assert data["title"] == "My House"
-        assert data["category"] == "City"
-        assert "id" in data
-
-    def test_get_build(self, client):
-        payload = {
-            "title": "Get Test",
-            "description_json": "{}",
-        }
-        created = client.post("/api/gallery", json=payload).json()
-        resp = client.get(f"/api/gallery/{created['id']}")
-        assert resp.status_code == 200
-        assert resp.json()["title"] == "Get Test"
-
-    def test_get_nonexistent_returns_404(self, client):
-        resp = client.get("/api/gallery/nonexistent_id")
-        assert resp.status_code == 404
-
-    def test_star_build(self, client):
-        payload = {"title": "Star Test", "description_json": "{}"}
-        created = client.post("/api/gallery", json=payload).json()
-        resp = client.patch(
-            f"/api/gallery/{created['id']}/star", json={"stars": 5}
-        )
-        assert resp.status_code == 200
-        assert resp.json()["stars"] == pytest.approx(5.0)
-
-    def test_star_nonexistent_returns_404(self, client):
-        resp = client.patch("/api/gallery/nonexistent/star", json={"stars": 3})
-        assert resp.status_code == 404
-
-    def test_filter_by_category(self, client):
-        client.post(
-            "/api/gallery",
-            json={
-                "title": "City Build",
-                "description_json": json.dumps({"category": "City"}),
-            },
-        )
-        client.post(
-            "/api/gallery",
-            json={
-                "title": "Space Build",
-                "description_json": json.dumps({"category": "Space"}),
-            },
-        )
-        resp = client.get("/api/gallery", params={"category": "City"})
-        assert resp.status_code == 200
-        builds = resp.json()
-        assert all(b["category"] == "City" for b in builds)
-
-    def test_search_query(self, client):
-        client.post(
-            "/api/gallery",
-            json={"title": "Red Castle", "description_json": "{}"},
-        )
-        client.post(
-            "/api/gallery",
-            json={"title": "Blue Car", "description_json": "{}"},
-        )
-        resp = client.get("/api/gallery", params={"q": "Castle"})
-        assert resp.status_code == 200
-        builds = resp.json()
-        assert len(builds) == 1
-        assert "Castle" in builds[0]["title"]
+def test_generate_corrupt_image():
+    resp = client.post(
+        "/api/generate-bricks",
+        files={"image": ("bad.png", b"\x89PNG\r\n\x1a\ngarbage", "image/png")},
+    )
+    assert resp.status_code == 400

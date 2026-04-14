@@ -7,7 +7,6 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
-import torch
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -15,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 def seed_everything(seed: int = 42):
     """Set random seeds for reproducibility."""
+    import torch
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -150,7 +150,10 @@ def compute_all_metrics(
 
 # ── Planner-specific metrics ──────────────────────────────────────────
 
-from backend.inference.constraint_engine import POSITION_ORDER
+POSITION_ORDER = {
+    "bottom": 0, "left": 1, "right": 1, "front": 1, "back": 1,
+    "center": 1, "top": 2,
+}
 
 
 def compute_structural_coherence(pred: dict) -> float:
