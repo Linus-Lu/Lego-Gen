@@ -26,6 +26,12 @@ backend/models/checkpoints/
 # Data (generated, not source)
 data/
 
+# Test coverage
+.coverage
+coverage/
+htmlcov/
+frontend/coverage/
+
 # Logs & outputs
 logs/
 *.log
