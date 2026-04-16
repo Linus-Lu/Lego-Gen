@@ -90,6 +90,13 @@ class TestGenerateBricks:
         for line in resp.json()["bricks"].splitlines():
             assert brick_re.match(line), f"Bad brick line: {line!r}"
 
+    def test_generate_bricks_with_n_returns_bon_metadata(self, client):
+        resp = client.post("/api/generate-bricks", data={"prompt": "a small red house", "n": "4"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["metadata"]["n"] == 4
+        assert "picked_index" in body["metadata"]
+
 
 class TestGenerateStream:
     def test_image_stream_emits_events(self, client):

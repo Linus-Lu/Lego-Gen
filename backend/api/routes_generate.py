@@ -33,8 +33,14 @@ def _decode_image(contents: bytes) -> Image.Image:
 async def generate_bricks(
     image: UploadFile = File(default=None),
     prompt: str = Form(default=""),
+    n: int = Form(default=1),
 ):
-    """Image or text → brick-coordinate model. Non-streaming."""
+    """Image or text → brick-coordinate model. Non-streaming.
+
+    If n > 1, runs Best-of-N sampling and returns the picked candidate. The
+    response shape is unchanged; n/picked_index/stable_rate are stamped on
+    metadata.
+    """
     pipeline = get_brick_pipeline()
     loop = asyncio.get_event_loop()
 
@@ -44,9 +50,15 @@ async def generate_bricks(
         contents = await image.read()
         pil_image = _decode_image(contents)
         del contents
-        call = lambda: pipeline.generate_from_image(pil_image)
+        if n > 1:
+            call = lambda: _from_image_bon(pipeline, pil_image, n)
+        else:
+            call = lambda: pipeline.generate_from_image(pil_image)
     elif prompt and prompt.strip():
-        call = lambda: pipeline.generate(prompt.strip())
+        if n > 1:
+            call = lambda: pipeline.generate_best_of_n(prompt.strip(), n=n)
+        else:
+            call = lambda: pipeline.generate(prompt.strip())
     else:
         raise HTTPException(status_code=400, detail="Provide an image or prompt")
 
@@ -60,6 +72,18 @@ async def generate_bricks(
             status_code=504,
             detail=f"Inference timed out after {INFERENCE_TIMEOUT_SECONDS}s",
         )
+
+
+def _from_image_bon(pipeline, pil_image, n: int) -> dict:
+    """Image path BoN: describe once, then BoN on the caption.
+
+    Avoids running Stage 1 n times — it's the expensive VLM call.
+    """
+    from backend.inference.brick_pipeline import _get_stage1_pipeline
+    caption = _get_stage1_pipeline().describe(pil_image)
+    result = pipeline.generate_best_of_n(caption, n=n)
+    result["caption"] = caption
+    return result
 
 
 def _sse_event(event: str, data: dict) -> str:
