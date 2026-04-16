@@ -1,50 +1,50 @@
 """FastAPI application for LEGOGen backend."""
 
+import asyncio
+import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backend.api.routes_generate import router as generate_router
-from backend.api.routes_validate import router as validate_router
 from backend.api.routes_gallery import router as gallery_router
 from backend.storage import gallery_db
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup/shutdown lifecycle. Preload model so first request isn't slow."""
-    import asyncio, os
+    """Startup/shutdown lifecycle. Preload models so first request isn't slow."""
     await gallery_db.init_db()
     if os.environ.get("LEGOGEN_DEV", "1") != "1":
-        print("LEGOGen API starting — preloading model...")
+        print("LEGOGen API starting — preloading models...")
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _preload_model)
-        print("LEGOGen API ready. Model loaded.")
+        await loop.run_in_executor(None, _preload_models)
+        print("LEGOGen API ready. Models loaded.")
     else:
         print("LEGOGen API ready (dev mode — mock pipeline).")
     yield
     print("Shutting down LEGOGen.")
 
 
-def _preload_model():
-    """Load the unified pipeline in a thread so startup isn't blocked."""
-    from backend.inference.pipeline import get_pipeline
-    get_pipeline()
+def _preload_models():
+    """Load the brick + Stage 1 pipelines in a thread so startup isn't blocked."""
+    from backend.inference.brick_pipeline import get_brick_pipeline, _get_stage1_pipeline
+    get_brick_pipeline()
+    _get_stage1_pipeline()
 
 
 app = FastAPI(
     title="LEGOGen API",
-    description="Generate LEGO building instructions from images",
-    version="0.1.0",
+    description="Two-stage pipeline: image/text → LEGO brick coordinates",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
-# CORS — allow frontend dev server
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -54,7 +54,6 @@ app.add_middleware(
 )
 
 app.include_router(generate_router)
-app.include_router(validate_router)
 app.include_router(gallery_router)
 
 

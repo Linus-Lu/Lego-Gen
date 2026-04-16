@@ -1,33 +1,30 @@
 # Training and Inference
 
-Reference documentation for the Lego-Gen training pipeline and the runtime
-inference stack, reflecting the post-"strip to two-stage" state of the tree.
-All file paths and line numbers refer to the repo at the main branch tip.
+Reference documentation for the LEGOGen training pipeline and the runtime
+inference stack. Reflects the brick-only state of the tree after the legacy
+JSON path was removed.
 
 ---
 
 ## 1. Two-Stage Architecture
 
-The system decomposes "image → buildable LEGO" into two independently
-fine-tuned Qwen stages plus a runtime-only validation layer:
+The runtime decomposes "image → buildable LEGO" into two independently
+fine-tuned Qwen stages followed by a runtime-only physics validation layer.
 
 | Stage | Job | Base model | Input | Output |
 |-------|-----|-----------|-------|--------|
-| Stage 1 | Perceive | `Qwen/Qwen3.5-9B` (+ vision) | RGB image | 1–3 sentence geometry/color/scale description |
-| Stage 2 | Build | `Qwen/Qwen3.5-4B` | Text caption | Newline-separated brick sequence `HxW (x,y,z) #RRGGBB` |
+| Stage 1 | Perceive | `Qwen/Qwen3.5-9B` (multimodal)       | RGB image      | 1–3 sentence geometry / colour / scale description |
+| Stage 2 | Build   | `Qwen/Qwen3.5-4B`                    | Text caption   | Newline-separated `HxW (x,y,z) #RRGGBB` sequence    |
 
-Two deployment paths live on top of those stages:
+Two entry points live on top of those stages:
 
 - **Image → Bricks** — Stage 1 caption feeds Stage 2; returns placed bricks.
-- **Text → Bricks** — skip Stage 1, user prompt goes straight to Stage 2.
+- **Text → Bricks** — skip Stage 1; user prompt goes straight to Stage 2.
 
-A legacy **image → structured JSON** path (`UnifiedPipeline`) also remains in
-`backend/inference/pipeline.py` and is used by `/api/generate`. It reuses
-the Stage 1 adapter for the image → text step, then prompts the same 9B
-backbone against a JSON schema (see §4.3). There is no active training
-script producing the Stage 2 JSON adapter in the current tree — the adapter
-at `UNIFIED_CHECKPOINT_DIR` is loaded if it exists on disk, otherwise the
-pipeline runs the base 9B model without an adapter (`pipeline.py:213-219`).
+There is no JSON head and no structured-description path. The 10-check
+stability checker, constraint engine, and post-hoc validator are gone —
+their role is now filled by per-brick grammar + voxel + LP enforcement
+**during** generation.
 
 ---
 
@@ -35,24 +32,21 @@ pipeline runs the base 9B model without an adapter (`pipeline.py:213-219`).
 
 All training and inference knobs live in `backend/config.py`.
 
-### 2.1 Model IDs (`config.py:28-102`)
+### 2.1 Model IDs
 
 | Constant | Value | Used by |
 |----------|-------|---------|
-| `MODEL_NAME` | `"Qwen/Qwen3-VL-8B-Instruct"` | Legacy — no longer trained; left for back-compat imports |
-| `UNIFIED_MODEL_NAME` | `"Qwen/Qwen3.5-9B"` | Stage 1 training, `UnifiedPipeline` base |
-| `PLANNER_MODEL_NAME` | `"Qwen/Qwen3.5-9B"` | JSON planner path inside `UnifiedPipeline` |
-| `BRICK_MODEL_NAME` | `"Qwen/Qwen3.5-4B"` | Stage 2 brick training + `BrickPipeline` |
+| `STAGE1_MODEL_NAME` | `"Qwen/Qwen3.5-9B"` | Stage 1 training + `Stage1Pipeline` |
+| `BRICK_MODEL_NAME`  | `"Qwen/Qwen3.5-4B"` | Stage 2 training + `BrickPipeline` |
 
-### 2.2 Checkpoint paths (`config.py`)
+### 2.2 Checkpoint paths
 
 - Stage 1 LoRA adapter: `CHECKPOINT_DIR / "qwen35-9b-lego-stage1-lora"` → `STAGE1_CHECKPOINT_DIR`
-- Stage 2 JSON adapter (legacy): `CHECKPOINT_DIR / "qwen35-9b-lego-stage2-lora"` → `UNIFIED_CHECKPOINT_DIR`
 - Stage 2 Brick adapter: `CHECKPOINT_DIR / "qwen35-4b-brick-lora"` → `BRICK_CHECKPOINT_DIR`
 
 ### 2.3 Hyperparameters (verbatim from `config.py`)
 
-**Stage 1** (lines 91-99)
+**Stage 1**
 
 | Knob | Value |
 |------|-------|
@@ -64,7 +58,7 @@ All training and inference knobs live in `backend/config.py`.
 | `STAGE1_NUM_EPOCHS` | `3` |
 | `STAGE1_WARMUP_STEPS` | `100` |
 
-**Stage 2 Brick** (lines 102-112)
+**Stage 2 Brick**
 
 | Knob | Value |
 |------|-------|
@@ -76,27 +70,11 @@ All training and inference knobs live in `backend/config.py`.
 | `BRICK_MAX_SEQ_LENGTH` | `4096` |
 | `BRICK_NUM_EPOCHS` | `3` |
 
-**Stage 2 JSON (legacy, inference-only)** (lines 80-87)
+**Inference**
 
-| Knob | Value |
-|------|-------|
-| `UNIFIED_LEARNING_RATE` | `5e-5` |
-| `UNIFIED_BATCH_SIZE` | `1` (effective 32 with `UNIFIED_GRADIENT_ACCUMULATION=32`) |
-| `UNIFIED_MAX_SEQ_LENGTH` | `4096` |
-| `UNIFIED_QUANTIZATION_BITS` | `4` |
-
-**Shared / LoRA / quantization** (lines 35-45)
-
-- `LORA_TARGET_MODULES = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]`
-- `QUANTIZATION_BITS = 4` (NF4, with double-quantization)
-- `USE_BF16` — auto-detected from the GPU
-
-**Inference** (around line 151)
-
-- `MAX_NEW_TOKENS = 2048`
-- `TEMPERATURE = 0.7`
-- `TOP_P = 0.9`
-- `INFERENCE_TIMEOUT_SECONDS = 120`
+- `INFERENCE_TIMEOUT_SECONDS = 120` (route-level timeout)
+- Stage 1 generation: `max_new_tokens=256`, `temperature=0.7`, `top_p=0.9`
+- Stage 2 generation: `BASE_TEMPERATURE=0.6` (fixed; no ramp)
 
 ---
 
@@ -104,10 +82,10 @@ All training and inference knobs live in `backend/config.py`.
 
 ### 3.1 Stage 1 — Image → Description (`backend/training/train_stage1.py`)
 
-Fine-tunes a LoRA adapter on the 9B Qwen3.5 VL-style model so it emits a
+Fine-tunes a LoRA adapter on the 9B Qwen3.5 multimodal model so it emits a
 short, LEGO-relevant caption from a photograph.
 
-**Entry points** (`train_stage1.py:9-20`):
+**Entry points**:
 
 ```bash
 # Single GPU
@@ -130,7 +108,8 @@ HF_ENDPOINT=https://hf-mirror.com torchrun --nproc_per_node=4 \
 `data/stage1_manifest.json` (list of `{image_path, description, category,
 source}`) built by `backend/data_pipeline/build_stage1_dataset.py`, which
 matches COCO images with StableText2Brick captions through the
-`COCO_TO_ST2B_CATEGORY` map in `config.py`.
+`COCO_TO_ST2B_CATEGORY` map in `config.py`. Image augmentations come from
+`TRAIN_TRANSFORMS` / `VAL_TRANSFORMS` in `backend/data_pipeline/dataset.py`.
 
 The collator stacks `input_ids`, `attention_mask`, `labels`,
 `mm_token_type_ids` and concatenates `pixel_values`. The dataset masks all
@@ -138,8 +117,13 @@ tokens before the last `"<|im_start|>assistant\n"` marker with `-100` so
 loss is only computed on the description, not the prompt.
 
 **LoRA config** — `r=32`, `alpha=64`, `target_modules="all-linear"`,
-`dropout=0.05`. Vision encoder parameters (names containing `visual` /
-`vision`) are frozen.
+`dropout=0.05`, with `use_dora=True` and `use_rslora=True`. Vision encoder
+parameters (names containing `visual` / `vision`) are frozen.
+
+PiSSA is intentionally **not** enabled on Stage 1: PiSSA initializes the
+adapter by SVD on the full-precision base weights, which is incompatible
+with the 4-bit NF4 quantized load used here. DoRA and rsLoRA work on top
+of the quantized base without the SVD step.
 
 **Trainer settings** (HuggingFace `Trainer` + `TrainingArguments`):
 
@@ -150,14 +134,14 @@ loss is only computed on the description, not the prompt.
 - W&B logging via `backend.training.utils.setup_wandb` (auto-disabled on non-rank-0)
 
 Checkpoint written to `STAGE1_CHECKPOINT_DIR` (+ `adapter_config.json` so
-the inference pipeline can detect its presence).
+`Stage1Pipeline` can detect its presence).
 
 ### 3.2 Stage 2 Brick — Text → Brick coordinates (`backend/training/train_brick.py`)
 
 Fine-tunes a LoRA adapter on Qwen3.5-4B to emit the brick sequence format
 consumed by `BrickPipeline`.
 
-**Entry point** (`train_brick.py:313-317`):
+**Entry point**:
 
 ```bash
 python -m backend.training.train_brick \
@@ -172,29 +156,22 @@ python -m backend.training.train_brick \
 the brick sequence as the assistant reply. `prepare_brick_dataset.py`
 generates these from Rebrickable CSVs.
 
-**Curriculum** (`train_brick.py:99-125`) — samples are split into
-"untruncated" (estimated tokens `(len(content)/3.0) + 80` ≤ `max_seq_length`)
-and "truncated", then concatenated so the model sees the clean prefix
-first. A single log line like
+**Curriculum** — samples are split into "untruncated" (estimated tokens
+`(len(content)/3.0) + 80` ≤ `max_seq_length`) and "truncated", then
+concatenated so the model sees the clean prefix first.
 
-```
-Curriculum: 2500 untruncated, 500 truncated (16.7%) at max_seq_length=4096
-```
-
-reports the split.
-
-**Structure-aware loss** (`train_brick.py:44-94`, class
-`BrickStructureWeights`). Per-token weights:
+**Structure-aware loss** (`train_brick.py`, class `BrickStructureWeights`).
+Per-token weights:
 
 | Token class | Weight |
 |-------------|--------|
 | Boilerplate (`(`, `)`, `,`, `x`, `#`, spaces, newlines) | `0.1` |
 | Dimension combos (`2x4`, `1x2`, …, `2x2`) | `3.0` |
-| Everything else (coordinate digits, hex, etc.) | `1.0` (default) |
+| Everything else (coordinate digits, hex, etc.) | `1.0` |
 | Masked prompt tokens (`-100`) | `0.0` |
 
-Implemented via an override of `Trainer.compute_loss` (`train_brick.py:260-283`)
-that applies the weights to a single vectorized cross-entropy call.
+Implemented via an override of `Trainer.compute_loss` that applies the
+weights to a single vectorized cross-entropy call.
 
 **Trainer settings** — `trl.SFTTrainer` (with HF `TrainingArguments`):
 
@@ -206,7 +183,10 @@ that applies the weights to a single vectorized cross-entropy call.
 
 **LoRA config** — `r=32`, `alpha=64`, `dropout=0.05`,
 `target_modules=["q_proj", "v_proj"]` (narrower than Stage 1 because the
-task is structurally simpler).
+task is structurally simpler), with `use_dora=True`, `use_rslora=True`,
+and `init_lora_weights="pissa"`. PiSSA is safe here because the base is
+loaded in bf16 (no 4-bit quantization on the Stage 2 Brick trainer), so
+the SVD-based adapter initialization can run against the true weights.
 
 Checkpoint written to `BRICK_CHECKPOINT_DIR`.
 
@@ -215,27 +195,14 @@ Checkpoint written to `BRICK_CHECKPOINT_DIR`.
 Single entry point for a clean GPU box. Four steps, all overridable:
 
 1. **Download COCO 2017** (`annotations_trainval2017.zip`, `train2017.zip` ~18 GB) into `data/coco/`. Skipped if present, or with `--skip-coco`.
-2. **Build Stage 1 manifest** by running `python -m backend.data_pipeline.build_stage1_dataset` (skipped when `data/stage1_manifest.json` already exists).
-3. **Train Stage 2 Brick** (`python -m backend.training.train_brick --output-dir <…> --epochs 3`), logs to `training_stage2.log`.
-4. **Train Stage 1** (`python -m backend.training.train_stage1 --manifest data/stage1_manifest.json`), logs to `training_stage1.log`.
-
-Flags: `--skip-coco`, `--stage2-only`, `--stage1-only`, `--no-wandb`,
-`--resume=<path>` (forwarded to the brick trainer).
+2. **Build Stage 1 manifest** by running `python -m backend.data_pipeline.build_stage1_dataset`.
+3. **Train Stage 2 Brick** (`python -m backend.training.train_brick --output-dir <…> --epochs 3`).
+4. **Train Stage 1** (`python -m backend.training.train_stage1 --manifest data/stage1_manifest.json`).
 
 ### 3.4 Shared training utilities (`backend/training/utils.py`)
 
 - `seed_everything(seed)` — deterministic torch/numpy/random seeding.
 - `setup_wandb(project, run_name, ...)` — W&B init gated on `WANDB_DISABLED` and rank.
-- Metric helpers used by callbacks: `json_validity_rate`, `color_f1`, `parts_f1`, `structural_coherence`.
-
-### 3.5 Data pipeline module (`backend/data_pipeline/`)
-
-| File | Purpose |
-|------|---------|
-| `dataset_stage1.py` | `Stage1Dataset`, `Stage1Collator` for image→description |
-| `dataset.py` | `LegoDataset` + `TRAIN_TRANSFORMS` / `VAL_TRANSFORMS` (legacy image→JSON path) |
-| `build_stage1_dataset.py` | Build `stage1_manifest.json` from COCO + ST2B |
-| `prepare_brick_dataset.py` | Download Rebrickable CSVs, emit brick JSONL |
 
 ---
 
@@ -243,83 +210,75 @@ Flags: `--skip-coco`, `--stage2-only`, `--stage1-only`, `--no-wandb`,
 
 ### 4.1 HTTP surface (`backend/app.py`, `backend/api/routes_*.py`)
 
-`backend/app.py:1-64` wires a FastAPI app with CORS, a `/health` probe, and
-three routers.
+`backend/app.py` wires a FastAPI app with CORS, a `/health` probe, and two
+routers.
 
 **Generate** (`backend/api/routes_generate.py`):
 
-- `POST /api/generate` — multipart `image` (+ optional `prompt`) → full build (description JSON + steps + validation).
-- `POST /api/generate-from-text` — JSON body `{prompt}` → same shape as above, no Stage 1.
-- `POST /api/generate-bricks` — accepts image or text → `BrickPipeline` output (`bricks`, `brick_count`, `stable`, metadata).
-- `POST /api/generate-stream` — SSE; emits `{"stage": "stage1"|"stage2"|"validating"}` progress events, then a final `{"result": …}`.
+- `POST /api/generate-bricks` — accepts image or text → `BrickResponse`
+  (`{bricks, caption?, brick_count, stable, metadata}`). Non-streaming.
+- `POST /api/generate-stream` — SSE stream of events:
+  - `progress` `{stage: "stage1"|"stage2", message, caption?}`
+  - `brick`    `{count}` — after each placement
+  - `rollback` `{count}` — after each physics rollback
+  - `result`   full `BrickResponse`
+  - `error`    `{detail}`
 
-All generate endpoints hash the raw bytes/prompt with SHA-256, dispatch the
-blocking call through `asyncio.get_event_loop().run_in_executor(None, …)`,
-and wrap the call in `asyncio.wait_for(..., INFERENCE_TIMEOUT_SECONDS)` to
-avoid indefinite GPU holds (`routes_generate.py:47-60`).
-
-**Validate** (`routes_validate.py`): `POST /api/validate` with a
-`LegoDescription` JSON body — returns a `ValidationReport` from the
-stability checker (see §4.5).
+Both endpoints dispatch the blocking call through
+`asyncio.get_event_loop().run_in_executor(None, …)` and wrap it in
+`asyncio.wait_for(..., INFERENCE_TIMEOUT_SECONDS)` to avoid indefinite GPU
+holds. The streaming route passes an `on_progress` callback into the
+pipeline; the pipeline queues brick/rollback events, the route drains the
+queue between model steps and emits SSE frames.
 
 **Gallery** (`routes_gallery.py`): `GET/POST /api/gallery`,
 `GET /api/gallery/{id}`, `PATCH /api/gallery/{id}/star`. Backed by SQLite
-through `backend/storage/gallery_db.py` (async, `aiosqlite`).
+through `backend/storage/gallery_db.py` (async, `aiosqlite`). Schema:
+`{id, title, caption, bricks, brick_count, stable, thumbnail_b64,
+stars, star_count, created_at}`.
 
-### 4.2 `UnifiedPipeline` (`backend/inference/pipeline.py:192-710`)
+### 4.2 `Stage1Pipeline` (`backend/inference/stage1_pipeline.py`)
 
-The singleton returned by `get_pipeline()` wraps the 9B Qwen3.5 model
-(`LegoUnifiedModel` in `backend/models/unified_model.py`) loaded with 4-bit
-NF4 quantization and supports **named LoRA adapters** (`set_adapter("default"|"stage1")`).
+Minimal wrapper around Qwen3.5-9B in 4-bit NF4:
 
-Construction (`pipeline.py:201-252`):
+1. Builds `AutoProcessor` with vision pixel bounds `[256*28², 512*28²]`.
+2. Loads `Qwen3_5ForConditionalGeneration` with `BitsAndBytesConfig` (NF4,
+   double-quant, bf16 compute) and `device_map="auto"`.
+3. If `STAGE1_CHECKPOINT_DIR/adapter_config.json` exists, wraps the base
+   with `PeftModel.from_pretrained(...)`.
+4. Exposes `describe(image) → str`: builds the Stage 1 chat template with
+   the system prompt from `config.STAGE1_SYSTEM_PROMPT`, generates up to
+   256 tokens at `temperature=0.7, top_p=0.9`, decodes, strips
+   `<think>…</think>` blocks, returns the trimmed caption.
 
-1. Build the base wrapper with 4-bit quant.
-2. Load the JSON (Stage 2) adapter from `UNIFIED_CHECKPOINT_DIR` as the
-   `default` adapter; if missing, run the base model (no fallback to the
-   legacy `Qwen3-VL-8B` adapter — it's incompatible with the 9B backbone).
-3. If `STAGE1_CHECKPOINT_DIR/adapter_config.json` exists, attach the Stage 1
-   adapter under the name `stage1`, set `has_stage1=True`, and log
-   `"Two-stage pipeline enabled (Stage 1 + Stage 2)"`.
-4. Initialize and warm up the three caches (§4.4).
-5. Pre-compute the Stage 1 KV prefix if two-stage is available.
+Singletons live in `brick_pipeline._get_stage1_pipeline()` (not
+`stage1_pipeline.py` — the factory is colocated with Brick so Brick can
+import it cleanly). In dev mode (`LEGOGEN_DEV=1`) it returns a fixed
+caption via `_MockStage1`.
 
-Key methods:
+### 4.3 `BrickPipeline` (`backend/inference/brick_pipeline.py`)
 
-- `describe_image_stage1(image)` (`pipeline.py:532-625`) — swap to
-  `stage1` adapter, generate ≤256 tokens from
-  `[STAGE1_SYSTEM_PROMPT, image, "Describe this object for LEGO building."]`,
-  strip thinking blocks, swap back to `default`. Adapter swap overhead is
-  logged when it exceeds 5 ms.
-- `describe_from_text(prompt)` (`pipeline.py:434-530`) — text → JSON using
-  `PLANNER_SYSTEM_PROMPT`. 2048 tokens, response cache keyed on
-  `SHA-256(prompt.strip())`.
-- `describe_image(image)` (`pipeline.py:316-432`) — direct single-stage
-  image → JSON, used when `has_stage1=False`.
-- `generate_build(image, cache_key=…)` (`pipeline.py:627-671`) — top-level
-  entry. If `has_stage1`: two-stage response cache on key `f"twostage:{cache_key}"`,
-  then Stage 1 → Stage 2 JSON → `json_to_steps` → stability report. Otherwise
-  falls back to `describe_image`.
-
-A `MockPipeline` (used when `LEGOGEN_DEV=1`) lives just above at
-`pipeline.py:77-190`; it returns a canned description/steps/validation in
-~42 ms and never touches a GPU.
-
-### 4.3 `BrickPipeline` (`backend/inference/brick_pipeline.py:35-146+`)
-
-The Stage 2 Brick runtime. Loads `Qwen/Qwen3.5-4B` with the same 4-bit NF4
+The Stage 2 runtime. Loads `Qwen/Qwen3.5-4B` with the same 4-bit NF4
 config and, if `BRICK_CHECKPOINT_DIR` exists, wraps it with the LoRA
 adapter via `peft.PeftModel.from_pretrained`.
 
-Generation constants (top of file):
+Generation constants:
 
 - `MAX_BRICKS = 500`
 - `MAX_REJECTIONS = 500` per brick
 - `MAX_ROLLBACKS = 100`
-- Temperature curve: `BASE_TEMPERATURE=0.6` → `+TEMP_INCREMENT=0.01` per
-  rejection, capped at `MAX_TEMPERATURE=2.0`.
+- Temperature: fixed at `BASE_TEMPERATURE=0.6`. The old rejection-driven
+  temperature ramp is gone — grammar-constrained decoding makes parse
+  failures impossible, so the only remaining rejection cause is a voxel
+  collision, which doesn't benefit from higher temperature.
 
-Prompt format (lines 27-32):
+The decoder runs under an `outlines.processors.RegexLogitsProcessor` built
+from `BRICK_PATTERN` (the 14 allowed dim strings × coord tuple × hex
+color), attached at `BrickPipeline.__init__` and passed into every
+`model.generate(...)` call. This forces every token sequence to be a
+syntactically valid brick line before it reaches the voxel check.
+
+Prompt format:
 
 ```
 System: You are a LEGO master builder.
@@ -333,114 +292,55 @@ User:   Create a colored LEGO model. Format: <dims> (<x>,<y>,<z>) <#hex>.
 Each line is parsed with the regex
 `(\d+)x(\d+) \((\d+),(\d+),(\d+)\) #([0-9A-Fa-f]{6})`.
 
-The generation loop combines two correctness mechanisms:
+The generation loop combines three correctness mechanisms:
 
-- **Rejection sampling** — each brick is generated one at a time. If the
-  emitted line doesn't parse or collides with the voxel grid
-  (`backend/brick/occupancy.py::VoxelGrid.can_place` — shape / bounds /
-  collision), the temperature is bumped and the brick is re-sampled.
-- **Physics rollback** — after each placement, `is_stable` (BFS from
-  `z=0` through overlapping layers, `backend/brick/stability.py`) is
-  evaluated. On failure, `find_first_unstable` returns the index of the
-  earliest brick that broke stability; the sequence is truncated to that
-  prefix, the voxel grid cleared, and generation resumes. Up to
-  `MAX_ROLLBACKS` full rollbacks are permitted.
+- **Grammar-constrained decoding** — the logits processor rules out any
+  token that would break the brick-line regex, so every decoded line
+  parses and uses only allowed dimensions.
+- **Voxel rejection sampling** — after decoding, the brick is checked
+  against `VoxelGrid.can_place` (`backend/brick/occupancy.py`) for
+  bounds / collision / shape-set membership. On failure the brick is
+  resampled at the same fixed temperature.
+- **Physics rollback** — after each placement, `is_stable`
+  (`backend/brick/stability.py`) runs a force-equilibrium LP: for every
+  non-ground brick, `scipy.optimize.linprog` (HiGHS) must find per-stud
+  contact forces satisfying vertical balance and zero moment about the
+  brick's COM, subject to a per-stud tension bound (`STUD_STRENGTH`) and
+  compression-only ground reactions. On failure,
+  `find_first_unstable` binary-searches prefixes for the earliest brick
+  that broke the LP; the sequence is truncated to that prefix, the voxel
+  grid cleared, and generation resumes. Up to `MAX_ROLLBACKS` full
+  rollbacks are permitted.
 
-Return shape: `{bricks: str, brick_count: int, stable: bool, metadata: {rejections, rollbacks, generation_time_ms}}`.
+`generate(caption, on_progress=…)` and `generate_from_image(image,
+on_progress=…)` both accept a streaming callback; the callback receives
+`{"type": "caption", "caption": …}` (image path only, after Stage 1
+completes), `{"type": "brick", "count": n}` after each placement, and
+`{"type": "rollback", "count": n}` after each rollback.
 
-### 4.4 Caching (`backend/inference/cache.py`)
+Return shape: `{bricks: str, caption?: str, brick_count: int, stable: bool,
+metadata: {model_version, generation_time_ms, rejections, rollbacks}}`.
 
-Three layers, all gated by flags in `config.py` (`CACHE_ENABLED`,
-`CACHE_KV_PREFIX_ENABLED`, `CACHE_RESPONSE_ENABLED`,
-`CACHE_TOKENIZATION_ENABLED`) and warmed at pipeline startup.
+In dev mode (`LEGOGEN_DEV=1`), `MockBrickPipeline` returns a fixed 12-brick
+red house deterministically.
 
-- **KV prefix cache** — pre-runs the forward pass on static system prompts
-  (`SYSTEM_PROMPT`, `PLANNER_SYSTEM_PROMPT`, `STAGE1_SYSTEM_PROMPT`),
-  stores the `DynamicCache`, and clones it into `past_key_values` on each
-  `generate()` call. Saves roughly the cost of ~100 prefix tokens per
-  request.
-- **Response cache** — thread-safe `OrderedDict` with LRU + TTL
-  (`CACHE_RESPONSE_MAX_SIZE=256`, `CACHE_RESPONSE_TTL_SECONDS=3600`). Only
-  activated when outputs are deterministic — the gate is
-  `CACHE_RESPONSE_ENABLED and (TEMPERATURE == 0 or not TOP_P or CACHE_RESPONSE_FOR_SAMPLING)` (`pipeline.py:27-29`). With the shipped
-  `TEMPERATURE=0.7` and `TOP_P=0.9`, this is off by default.
-- **Tokenization cache** — keyed dict for `apply_chat_template` outputs of
-  static prompt skeletons (`vision_template`, planner prefix, etc.).
+### 4.4 End-to-end request (image upload → streaming)
 
-### 4.5 Validation layer
-
-Two post-generation components used by the JSON path.
-
-**Constraint engine** (`backend/inference/constraint_engine.py`). Entry
-point `safe_parse_and_validate(raw_output)`:
-
-1. `repair_json_string` — regex fixups for trailing commas, unclosed
-   strings/brackets (for truncated outputs).
-2. `json.loads` → dict.
-3. `validate_lego_json` — enforce `REQUIRED_FIELDS`, typed fields,
-   enums (e.g. `complexity ∈ {simple, intermediate, advanced, expert}`).
-4. `enforce_valid_values` — clamp invalid enums, fix spatial positions.
-5. `repair_connects_to` — ensure `connects_to` references point to real
-   subassembly names.
-6. `validate_structural_order` — bottom-to-top ordering check.
-
-A shortcut `validate_and_repair_dict` skips the JSON round-trip when the
-caller already has a parsed dict (see `pipeline.py:54-62`).
-
-**Stability checker** (`backend/inference/stability_checker.py`).
-Singleton (`pipeline.py:34-43`) producing a `ValidationReport` with an
-integer `score ∈ [0, 100]`, a list of `CheckResult`, and a summary. The
-ten checks are split into:
-
-- *Legality*: `part_existence` (against `parts.csv.gz`),
-  `part_compatibility`, `color_validity` (against `colors.json`),
-  `quantity_legality` (thresholds
-  `QUANTITY_WARN_THRESHOLD=50`, `QUANTITY_FAIL_THRESHOLD=200`).
-- *Stability*: `foundation` (bottom subassembly present), `connectivity`
-  (subassembly adjacency graph), `cantilever`
-  (≥`MIN_CANTILEVER_CONNECTIONS=2` supports for overhangs), `top_heavy`
-  (support ratio ≥ `SUPPORT_RATIO_WARN=3.0`), `center_of_mass` within the
-  base footprint.
-
-**Postprocess** (`backend/inference/postprocess_manual.py`).
-`json_to_steps` sorts subassemblies by `POSITION_ORDER` (bottom → center
-→ sides → top) and emits `BuildStep` entries with `step_number`, `title`,
-`instruction`, `parts`, `part_count`.
-
-### 4.6 End-to-end request (image upload)
-
-1. `POST /api/generate` with a multipart image.
-2. `routes_generate.generate` validates content-type, reads bytes,
-   decodes to `PIL.Image`, computes `cache_key = sha256(bytes)`, frees the
-   raw bytes, and dispatches to the executor.
-3. `UnifiedPipeline.generate_build` checks the two-stage response cache,
-   then runs Stage 1 (adapter swap, ≤256-token caption, swap back).
-4. The caption feeds `describe_from_text`, which runs the Stage 2 JSON
-   generation against the planner system prompt (KV prefix cached), parses
-   with the constraint engine, and caches on the prompt hash.
-5. `json_to_steps` produces an ordered `BuildStep[]` and the stability
-   checker produces a `ValidationReport`.
-6. The combined result is cached under `f"twostage:{cache_key}"` and
-   returned as:
-
-   ```json
-   {
-     "description": { /* LegoDescription */ },
-     "steps":       [ /* BuildStep */ ],
-     "metadata":    {
-       "model_version": "qwen35-lego-two-stage-v1",
-       "generation_time_ms": 3200,
-       "json_valid": true,
-       "errors": [],
-       "cached": false
-     },
-     "validation":  { /* ValidationReport */ }
-   }
-   ```
-
-For `/api/generate-bricks` the Stage 1 caption is instead handed to
-`BrickPipeline.generate`, whose return shape is the brick-sequence dict
-described in §4.3.
+1. `POST /api/generate-stream` with a multipart image.
+2. `routes_generate.generate_stream` validates content-type, decodes to
+   `PIL.Image`, and opens the SSE response.
+3. Emits `progress {stage: "stage1"}`, then runs
+   `BrickPipeline.generate_from_image(image, on_progress)` on a thread.
+4. `generate_from_image` first calls `Stage1Pipeline.describe(image)` →
+   enqueues `{type: "caption", caption}`. The route drains the queue and
+   emits a `progress {stage: "stage1", caption}` event, then
+   `progress {stage: "stage2"}`.
+5. `BrickPipeline.generate(caption, on_progress)` runs the
+   grammar/voxel/LP loop. Each placed brick enqueues a `brick` event;
+   each rollback enqueues a `rollback` event. The route drains the queue
+   in ~50 ms ticks.
+6. When generation completes, the route emits `result <BrickResponse>`
+   and closes the stream.
 
 ---
 
@@ -450,28 +350,21 @@ described in §4.3.
 
 | Path | Purpose |
 |------|---------|
-| `app.py` | FastAPI app factory, lifespan (async model preload), CORS, `/health` |
-| `config.py` | Central config: model IDs, hyperparameters, paths, feature flags |
-| `api/routes_generate.py` | `/api/generate`, `/generate-from-text`, `/generate-bricks`, `/generate-stream` |
-| `api/routes_validate.py` | `/api/validate` (stability/legality report) |
+| `app.py` | FastAPI factory, lifespan (async model preload), CORS, `/health` |
+| `config.py` | Central config: model IDs, hyperparameters, paths |
+| `api/routes_generate.py` | `/api/generate-bricks`, `/api/generate-stream` |
 | `api/routes_gallery.py` | `/api/gallery*` CRUD |
-| `models/unified_model.py` | `LegoUnifiedModel` — 9B Qwen wrapper with named-adapter swap |
-| `models/tokenizer.py` | Chat templates, system prompts, JSON extraction, thinking-block stripping |
-| `inference/pipeline.py` | `UnifiedPipeline`, `MockPipeline`, singletons |
-| `inference/brick_pipeline.py` | `BrickPipeline` — rejection sampling + physics rollback |
-| `inference/cache.py` | KV prefix, response, and tokenization caches |
-| `inference/constraint_engine.py` | JSON schema validation / repair |
-| `inference/stability_checker.py` | 10-check legality + stability report |
-| `inference/postprocess_manual.py` | `json_to_steps` (JSON → ordered `BuildStep` list) |
-| `brick/` | `constants.py`, `parser.py`, `decoder.py`, `stability.py`, `occupancy.py` — brick math and physics primitives |
+| `inference/stage1_pipeline.py` | `Stage1Pipeline` (9B multimodal → caption) |
+| `inference/brick_pipeline.py` | `BrickPipeline` + factories + `MockBrickPipeline` + `_MockStage1` |
+| `brick/` | `constants.py`, `parser.py`, `decoder.py`, `stability.py`, `occupancy.py` — brick math + physics primitives |
+| `data_pipeline/dataset.py` | Shared `TRAIN_TRANSFORMS` / `VAL_TRANSFORMS` |
 | `data_pipeline/dataset_stage1.py` | `Stage1Dataset` + `Stage1Collator` |
 | `data_pipeline/build_stage1_dataset.py` | COCO + ST2B manifest builder |
 | `data_pipeline/prepare_brick_dataset.py` | Rebrickable → brick JSONL |
-| `data_pipeline/dataset.py` | `LegoDataset` + augmentations (legacy image→JSON) |
 | `training/train_stage1.py` | Stage 1 LoRA trainer (DDP-ready) |
 | `training/train_brick.py` | Stage 2 Brick LoRA trainer (SFTTrainer + structure-aware loss) |
-| `training/utils.py` | Seeding, W&B, metric helpers |
-| `storage/gallery_db.py` | Async SQLite gallery store |
+| `training/utils.py` | `seed_everything`, `setup_wandb` |
+| `storage/gallery_db.py` | Async SQLite gallery store (brick schema) |
 
 ### `scripts/`
 
@@ -480,30 +373,36 @@ described in §4.3.
 | `train_full_pipeline.sh` | 4-step orchestrator: COCO → manifest → Stage 2 → Stage 1 |
 | `train_brick_runpod.sh` | RunPod-specific helper for the brick trainer |
 | `prepare_dataset.py` | Rebrickable CSVs + set JSON + image collection |
-| `benchmark.py` | Inference latency benchmarking |
 | `bootstrap.sh` | Environment setup (deps, dirs, env vars) |
 
 ### `frontend/` (surface only)
 
-- Pages: `/` (Home), `/build` (BuildSession → `/api/generate`), `/guide/:buildId` (GuidancePage), `/explore` (ExplorePage → `/api/gallery`), `/about`.
-- The 3D viewer components (`LegoViewer`, `BrickCoordViewer`) render either the `LegoDescription` subassemblies or the brick-coordinate output; `ValidationPanel` renders the `ValidationReport`; `StepList` / `StepDetail` / `PartsChecklist` render the `BuildStep[]`.
-- `frontend/src/api/legogen.ts` defines the TS interfaces (`LegoDescription`, `BuildStep`, `BrickResponse`, `ValidationReport`) and helpers (`parseBrickString`, `bricksToSteps`).
+- Pages: `/` (Home), `/build` (BuildSession → `/api/generate-stream`),
+  `/guide/:buildId` (GuidancePage — layer walkthrough), `/explore`
+  (ExplorePage → `/api/gallery`), `/about` (system spec).
+- 3D viewer: `BrickCoordViewer` + `BrickMesh`.
+- API client: `frontend/src/api/legogen.ts` — `BrickResponse`,
+  `BrickCoord`, `GalleryBuild`, `StreamEvent` types plus
+  `parseBrickString`, `bricksToLayers`, `generateBricksStream`.
 
 ---
 
 ## 6. Gotchas
 
-- **Stage 2 JSON adapter is not trained by anything in the current tree.**
-  `train_full_pipeline.sh` trains Stage 1 and Stage 2 *Brick*. The JSON path
-  remains in `UnifiedPipeline` for back-compat and will run against the base
-  9B model unless an adapter is manually placed at `UNIFIED_CHECKPOINT_DIR`.
-- **Response cache is off under default sampling settings.** `TEMPERATURE=0.7`
-  and `TOP_P=0.9` gate out Layer 2 of `cache.py`. Flip
-  `CACHE_RESPONSE_FOR_SAMPLING` to enable approximate caching, or run with
-  `TEMPERATURE=0` for strict caching.
-- **Two different backbones at runtime.** `UnifiedPipeline` holds a 9B
+- **Gallery schema doesn't store a JSON description anymore.** The
+  `description_json` / `category` / `complexity` / `parts_count` columns
+  are gone; a gallery row is `{title, caption, bricks, brick_count,
+  stable, thumbnail_b64, stars, …}`. Anything reading the old columns
+  will 404.
+- **Two different backbones at runtime.** `Stage1Pipeline` holds a 9B
   Qwen3.5 (+ Stage 1 adapter) and `BrickPipeline` holds a separate 4B
-  Qwen3.5. Both use 4-bit NF4 quantization. Expect ~10 GB VRAM combined.
-- **Model IDs** `Qwen/Qwen3.5-9B` and `Qwen/Qwen3.5-4B` are strings consumed
-  literally by `from_pretrained`. If the HF repo you are mirroring uses a
-  different name, set `HF_ENDPOINT` or pass `--model-path` to the trainers.
+  Qwen3.5 (+ Brick adapter). Both use 4-bit NF4 quantization. Expect
+  ~10 GB VRAM combined.
+- **Model IDs** `Qwen/Qwen3.5-9B` and `Qwen/Qwen3.5-4B` are strings
+  consumed literally by `from_pretrained`. If the HF repo you are
+  mirroring uses a different name, set `HF_ENDPOINT` or pass
+  `--model-path` to the trainers.
+- **No post-hoc validator endpoint.** `/api/validate` is removed. All
+  stability/legality enforcement happens during Stage 2 generation
+  (grammar + voxel + LP). If you want to re-check a gallery entry,
+  re-parse its `bricks` string and call `is_stable` directly.

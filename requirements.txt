@@ -9,7 +9,8 @@ pandas
 pillow
 requests
 transformers>=4.60.0
-peft>=0.7.0
+peft>=0.11.0
+outlines>=0.1.0
 accelerate>=0.25.0
 bitsandbytes>=0.41.0
 datasets>=2.16.0
