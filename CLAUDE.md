@@ -14,10 +14,10 @@ LEGOGEN_DEV=1 .venv/bin/python -m pytest -q
 LEGOGEN_DEV=1 .venv/bin/python -m pytest tests/test_brick_stability.py -v
 LEGOGEN_DEV=1 .venv/bin/python -m pytest tests/test_brick_stability.py::test_name -v
 
-# Backend (dev — MockPipeline, no GPU)
+# Backend (dev — MockBrickPipeline, no GPU)
 LEGOGEN_DEV=1 .venv/bin/uvicorn backend.app:app --reload --port 8000
 
-# Backend (prod — loads Qwen3.5-9B + adapters; requires ≥24 GB VRAM)
+# Backend (prod — loads Qwen3.5-9B + Qwen3.5-4B with LoRA; ≥24 GB VRAM)
 LEGOGEN_DEV=0 .venv/bin/uvicorn backend.app:app --host 0.0.0.0 --port 8000
 
 # Frontend
@@ -28,6 +28,8 @@ cd frontend && npm run build      # runs `tsc && vite build` — both must pass
 GPU-only tests are auto-skipped on machines without CUDA (`tests/conftest.py` adds a `gpu` marker and skips marked tests when `torch.cuda.is_available()` is false).
 
 There is no lint/format config in-tree (no ruff, eslint, prettier, mypy). Don't invent one.
+
+**Known pre-existing test failure**: `tests/test_brick_decoder.py::test_allowed_colors_populated` fails because `colors.json` isn't checked in. It's in the explicit skip list in `.claude/settings.local.json` — ignore it when running the suite.
 
 ## Training entry points
 
@@ -47,35 +49,35 @@ All training knobs (LR, LoRA ranks, batch sizes, seq lengths, checkpoint paths) 
 
 ## Architecture — what you need to know before editing
 
-The system is **two independent Qwen3.5 pipelines**, both loaded with 4-bit NF4 quantization, held as module-level singletons.
+The runtime is **two independent Qwen3.5 pipelines**, both loaded with 4-bit NF4 quantization, held as module-level singletons. There is no legacy JSON path — if you find references to `UnifiedPipeline`, `LegoUnifiedModel`, `constraint_engine`, or `/api/validate`, they are gone.
 
-### `UnifiedPipeline` (`backend/inference/pipeline.py`) — the JSON path
-- Wraps `Qwen/Qwen3.5-9B` (`backend/models/unified_model.py`) with **named LoRA adapters**: `default` (Stage 2 JSON at `UNIFIED_CHECKPOINT_DIR`) and `stage1` (Stage 1 caption adapter at `STAGE1_CHECKPOINT_DIR`).
-- `describe_image_stage1` → `describe_from_text` → constraint engine → `json_to_steps` → stability checker. Each request swaps adapters twice; swap overhead is logged if >5 ms.
-- `MockPipeline` (same file, ~line 77) returns canned data in ~42 ms when `LEGOGEN_DEV=1`. All tests run through this.
-- **Gotcha**: no training script in-tree produces the Stage 2 JSON adapter. If `UNIFIED_CHECKPOINT_DIR` is empty, it falls back to the base 9B with no adapter — do not fall back to the legacy `Qwen3-VL-8B` adapter (incompatible architecture).
+### `Stage1Pipeline` (`backend/inference/stage1_pipeline.py`) — image → caption
+- Loads `Qwen/Qwen3.5-9B` in 4-bit NF4 and, if `STAGE1_CHECKPOINT_DIR/adapter_config.json` exists, wraps it with the Stage 1 LoRA adapter.
+- Single method: `describe(image) → str`. Generates up to 256 tokens, strips `<think>…</think>` blocks.
+- Mocked by `_MockStage1` (same file's factory) when `LEGOGEN_DEV=1` — returns a fixed caption in no time.
 
-### `BrickPipeline` (`backend/inference/brick_pipeline.py`) — the brick-coord path
-- Separate `Qwen/Qwen3.5-4B` + LoRA, loaded independently of `UnifiedPipeline`. Both pipelines coexist at runtime (~10 GB VRAM combined).
-- Emits lines matching `(\d+)x(\d+) \((\d+),(\d+),(\d+)\) #([0-9A-Fa-f]{6})`. Correctness comes from three stacked mechanisms:
-  1. **Grammar-constrained decoding** via `outlines.processors.RegexLogitsProcessor` attached in `__init__` — token-level; bad dims/formats can't be emitted.
-  2. **Voxel rejection** via `VoxelGrid.can_place` (`backend/brick/occupancy.py`) — collision/bounds check after decode.
-  3. **Physics rollback** via `is_stable` (`backend/brick/stability.py`) running a per-stud LP (`scipy.optimize.linprog`). `find_first_unstable` binary-searches prefixes; up to `MAX_ROLLBACKS=100` full rollbacks allowed.
-- **Temperature is fixed at `BASE_TEMPERATURE=0.6`**. Don't reintroduce temperature ramping on rejections — the grammar makes parse failures impossible, and voxel collisions don't benefit from higher temperature.
+### `BrickPipeline` (`backend/inference/brick_pipeline.py`) — caption → brick lines
+- Separate `Qwen/Qwen3.5-4B` + LoRA. Combined with Stage 1, ~10 GB VRAM total.
+- Emits `HxW (x,y,z) #RRGGBB\n` lines. Correctness comes from three stacked mechanisms:
+  1. **Grammar-constrained decoding** via `outlines.processors.RegexLogitsProcessor` — token-level; parse failures impossible.
+  2. **Voxel rejection** via `VoxelGrid.can_place` (`backend/brick/occupancy.py`) — collision/bounds check.
+  3. **Physics rollback** via `is_stable` (`backend/brick/stability.py`) running a per-stud LP (`scipy.optimize.linprog`, HiGHS). `find_first_unstable` binary-searches prefixes; up to `MAX_ROLLBACKS=100` full rollbacks allowed.
+- **Temperature is fixed at `BASE_TEMPERATURE=0.6`**. Don't reintroduce temperature ramping — the grammar makes parse failures impossible, and voxel collisions don't benefit from higher temperature.
+- `generate(caption, on_progress=…)` and `generate_from_image(image, on_progress=…)` accept a callback that fires `{type:"caption"|"brick"|"rollback", …}` events — used by the SSE route to stream progress.
+- Mocked by `MockBrickPipeline` (same file) when `LEGOGEN_DEV=1`: returns a fixed 12-brick house.
 
-### Validation layer (JSON path only)
-- `constraint_engine.safe_parse_and_validate` → regex JSON repair → `json.loads` → schema + enum enforcement → `connects_to` repair → structural-order check. Use `validate_and_repair_dict` if you already have a parsed dict.
-- `stability_checker` produces a `ValidationReport` with `score ∈ [0, 100]` from 10 checks (part existence, color validity, quantity thresholds, foundation, connectivity, cantilever, top-heavy, center-of-mass, etc.). Singleton; fixtures monkey-patch it.
+### Factories
+`get_brick_pipeline()` and `_get_stage1_pipeline()` in `brick_pipeline.py` are the only entry points into the inference stack. Both return singletons; both branch on `LEGOGEN_DEV`.
 
-### Caching (`backend/inference/cache.py`)
-Three flag-gated layers, warmed at pipeline startup:
-- **KV-prefix cache** on the three static system prompts — cloned into `past_key_values` on each `generate()` call.
-- **Response cache** (LRU + TTL) — gated on `TEMPERATURE == 0 or not TOP_P or CACHE_RESPONSE_FOR_SAMPLING`. **Off by default** under the shipped `TEMPERATURE=0.7`/`TOP_P=0.9`.
-- **Tokenization cache** for `apply_chat_template` outputs.
+### API routes
+- `POST /api/generate-bricks` — image or text → `BrickResponse`. Non-streaming.
+- `POST /api/generate-stream` — same inputs → SSE with `progress | brick | rollback | result | error` events. The frontend's `BuildSession` uses this.
+- `GET/POST /api/gallery`, `GET /api/gallery/{id}`, `PATCH /api/gallery/{id}/star` — archive storing `{title, caption, bricks, brick_count, stable}`.
+- `GET /health`.
 
 ### Frontend surface
-React 19 + Vite + Three.js (R3F). `frontend/src/api/legogen.ts` holds the TS interfaces (`LegoDescription`, `BuildStep`, `BrickResponse`, `ValidationReport`) that mirror the backend contracts — keep them in sync when changing API shapes. Routes: `/`, `/build`, `/guide/:buildId`, `/explore`, `/about`.
+React 19 + Vite + Three.js (R3F). Aesthetic is "Blueprint Console" — JetBrains Mono labels, IBM Plex Sans body, Fraunces display; near-black base with an acid-lime (`#c6f432`) accent. `frontend/src/api/legogen.ts` holds the TS contracts (`BrickResponse`, `BrickCoord`, `GalleryBuild`, `StreamEvent`). Routes: `/`, `/build`, `/guide/:buildId`, `/explore`, `/about`. Styling is in `frontend/src/index.css` via `@theme` CSS variables — use those instead of hardcoding hex.
 
 ## When in doubt
 
-`docs/TRAINING_AND_INFERENCE.md` is the detailed, line-number-anchored reference for the training pipeline, the three caches, the validation layer, and the end-to-end request flow. Read it before refactoring any of those areas.
+`docs/TRAINING_AND_INFERENCE.md` is the detailed, line-number-anchored reference for training and the brick-generation runtime. Read it before refactoring training or stability/occupancy code.
