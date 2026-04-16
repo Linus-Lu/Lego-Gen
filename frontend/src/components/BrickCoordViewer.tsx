@@ -92,8 +92,8 @@ function Scene({
           position={[0, -0.01, 0]}
         />
       )}
-      {placed.map(b => (
-        <BrickMesh {...b} />
+      {placed.map(({ key, ...rest }) => (
+        <BrickMesh key={key} {...rest} />
       ))}
       <OrbitControls
         makeDefault
