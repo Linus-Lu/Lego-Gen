@@ -222,3 +222,13 @@ class TestGenerateLoop:
         ])
         result = pipeline.generate("test")
         assert result["metadata"]["rejections"] == 8
+
+
+def test_mock_generate_best_of_n_returns_valid_shape():
+    from backend.inference.brick_pipeline import MockBrickPipeline
+
+    pipe = MockBrickPipeline()
+    out = pipe.generate_best_of_n("a small red house", n=4, strategy="rank")
+    assert "bricks" in out and "brick_count" in out and "stable" in out
+    assert out["metadata"]["n"] == 4
+    assert out["metadata"]["picked_index"] in range(4)

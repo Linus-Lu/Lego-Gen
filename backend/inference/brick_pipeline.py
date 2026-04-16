@@ -11,10 +11,11 @@ from pathlib import Path
 from typing import Optional
 
 from backend.brick.constants import BRICK_SHAPES, WORLD_DIM
-from backend.brick.parser import Brick, parse_brick, serialize_brick
+from backend.brick.parser import Brick, parse_brick, parse_brick_sequence, serialize_brick
 from backend.brick.occupancy import VoxelGrid
 from backend.brick.stability import is_stable, find_first_unstable
 from backend.config import BRICK_MODEL_NAME, BRICK_CHECKPOINT_DIR, LEGOGEN_DEV
+from backend.inference.best_of_n import rank_candidates, cluster_and_pick
 
 _BRICK_RE = re.compile(r"(\d+)x(\d+) \((\d+),(\d+),(\d+)\) #([0-9A-Fa-f]{6})")
 
@@ -168,6 +169,37 @@ class BrickPipeline:
             },
         }
 
+    def generate_best_of_n(self, caption: str, n: int = 16, strategy: str = "cluster", on_progress=None) -> dict:
+        """Run generate() n times and return the chosen sample.
+
+        strategy="rank"    -> rank_candidates, return top
+        strategy="cluster" -> cluster_and_pick on stable set (falls back to rank)
+        """
+        candidates: list[dict] = []
+        for i in range(n):
+            sample = self.generate(caption, on_progress=None)
+            sample["bricks_parsed"] = parse_brick_sequence(sample["bricks"])
+            candidates.append(sample)
+            if on_progress is not None:
+                on_progress({"type": "sample", "index": i + 1, "of": n, "stable": sample["stable"]})
+
+        # Ranker/clusterer expect "bricks" to be a list of Brick for features.
+        for c in candidates:
+            c["bricks"] = c["bricks_parsed"]
+        if strategy == "rank":
+            picked = rank_candidates(candidates)[0]
+        else:
+            picked = cluster_and_pick(candidates, k=min(3, n), seed=0)
+        picked_index = candidates.index(picked)
+
+        # Restore the serialized "bricks" string on the returned dict.
+        picked["bricks"] = "\n".join(serialize_brick(b) for b in picked["bricks"])
+        picked.setdefault("metadata", {})
+        picked["metadata"]["n"] = n
+        picked["metadata"]["picked_index"] = picked_index
+        picked["metadata"]["stable_rate"] = sum(1 for c in candidates if c["stable"]) / n
+        return picked
+
     def generate_from_image(self, image, on_progress=None) -> dict:
         """Two-stage: image → Stage 1 caption → brick sequence."""
         caption = _get_stage1_pipeline().describe(image)
@@ -250,6 +282,14 @@ class MockBrickPipeline:
                 "rollbacks": 0,
             },
         }
+
+    def generate_best_of_n(self, caption: str, n: int = 16, strategy: str = "rank", on_progress=None) -> dict:
+        result = self.generate(caption, on_progress=on_progress)
+        result.setdefault("metadata", {})
+        result["metadata"]["n"] = n
+        result["metadata"]["picked_index"] = 0
+        result["metadata"]["stable_rate"] = 1.0
+        return result
 
     def generate_from_image(self, image, on_progress=None) -> dict:
         caption = "a small red house with a dark red tiled roof"
