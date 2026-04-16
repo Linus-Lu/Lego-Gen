@@ -2,7 +2,7 @@
 import numpy as np
 
 from backend.brick.parser import Brick
-from backend.inference.best_of_n import rank_candidates, structural_features
+from backend.inference.best_of_n import rank_candidates, structural_features, cluster_and_pick
 
 def test_rank_prefers_stable_then_brickcount():
     stable_big = {"bricks": [Brick(2, 4, 0, 0, 0, "C91A09")] * 8,  "stable": True,  "brick_count": 8}
@@ -33,3 +33,24 @@ def test_structural_features_dim_and_monotonicity():
     assert vb[3] > vs[3]
     # Feature 8 is unique-color count — both equal 1.
     assert vs[8] == vb[8] == 1.0
+
+
+def test_cluster_and_pick_returns_centroid_of_largest_valid_cluster():
+    big_cluster = [
+        {"bricks": [Brick(2, 4, 0, 0, 0, "C91A09")] * 10, "stable": True, "brick_count": 10},
+        {"bricks": [Brick(2, 4, 0, 0, 0, "C91A09")] * 11, "stable": True, "brick_count": 11},
+        {"bricks": [Brick(2, 4, 0, 0, 0, "C91A09")] * 9,  "stable": True, "brick_count": 9},
+    ]
+    singleton_outlier = [
+        {"bricks": [Brick(1, 1, 5, 5, 0, "0055BF")] * 1,  "stable": True, "brick_count": 1}
+    ]
+    all_unstable = [
+        {"bricks": [Brick(2, 4, 0, 0, 0, "C91A09")] * 12, "stable": False, "brick_count": 12},
+    ]
+
+    picked = cluster_and_pick(big_cluster + singleton_outlier + all_unstable, k=2, seed=0)
+
+    # Must be drawn from the majority stable cluster.
+    assert picked in big_cluster
+    # Prefer the centroid — should be the candidate closest to cluster mean count (10).
+    assert picked["brick_count"] == 10

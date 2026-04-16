@@ -2,6 +2,7 @@
 from typing import Iterable
 
 import numpy as np
+from sklearn.cluster import KMeans
 
 from backend.brick.parser import Brick
 
@@ -62,3 +63,36 @@ def structural_features(bricks: list[Brick]) -> np.ndarray:
         float(areas.mean()),
         float(len({b.color for b in bricks})),
     ], dtype=np.float32)
+
+
+def cluster_and_pick(candidates: list[dict], k: int = 2, seed: int = 0) -> dict:
+    """Filter to stable candidates, cluster by structural features, return the
+    candidate closest to the centroid of the largest cluster.
+
+    Falls back to rank_candidates when fewer than k stable candidates exist.
+    """
+    stable = [c for c in candidates if c["stable"]]
+    if len(stable) < max(k, 2):
+        ranked = rank_candidates(candidates)
+        return ranked[0]
+
+    feats = np.stack([structural_features(c["bricks"]) for c in stable])
+    # Normalize so brick-count doesn't dominate.
+    mean = feats.mean(axis=0)
+    std = feats.std(axis=0) + 1e-6
+    feats_z = (feats - mean) / std
+
+    k_eff = min(k, len(stable))
+    km = KMeans(n_clusters=k_eff, random_state=seed, n_init="auto").fit(feats_z)
+    labels = km.labels_
+
+    # Largest cluster wins.
+    counts = np.bincount(labels)
+    winner = int(np.argmax(counts))
+    members = [i for i, lbl in enumerate(labels) if lbl == winner]
+
+    # Centroid in normalized space -> pick closest member.
+    centroid = km.cluster_centers_[winner]
+    dists = np.linalg.norm(feats_z[members] - centroid, axis=1)
+    best = members[int(np.argmin(dists))]
+    return stable[best]
