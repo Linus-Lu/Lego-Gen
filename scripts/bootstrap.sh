@@ -187,19 +187,8 @@ ST2B_COUNT=$(find data/st2b_labels -name '*.json' 2>/dev/null | wc -l)
 if [ -d "data/st2b_labels" ] && [ "$ST2B_COUNT" -gt 1000 ]; then
     ok "ST2B labels already present ($ST2B_COUNT files)"
 else
-    echo "Converting StableText2Brick dataset (downloads from HuggingFace)..."
-    python scripts/convert_st2b.py
-    ok "ST2B dataset converted"
-fi
-
-# Add grid_pos to ST2B labels
-SAMPLE=$(find data/st2b_labels -name '*.json' -print -quit 2>/dev/null)
-if [ -n "$SAMPLE" ] && python3 -c "import json; d=json.load(open('$SAMPLE')); assert 'grid_pos' in d.get('subassemblies',[{}])[0].get('parts',[{}])[0]" 2>/dev/null; then
-    ok "grid_pos already present in ST2B labels"
-else
-    echo "Adding grid_pos to ST2B labels..."
-    python -m backend.data_pipeline.add_grid_pos
-    ok "grid_pos added to ST2B labels"
+    echo "ST2B labels not found. Download and convert the HuggingFace"
+    echo "StableText2Brick dataset into data/st2b_labels/ before training."
 fi
 
 # ══════════════════════════════════════════════════════════════════════

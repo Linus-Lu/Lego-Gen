@@ -3,11 +3,10 @@
 # Full Two-Stage Training Pipeline
 #
 # Runs everything needed to train the LEGOGen two-stage model:
-#   1. Preprocess ST2B labels (add grid_pos)
-#   2. Download COCO 2017 data (if not already present)
-#   3. Build Stage 1 manifest (COCO + ST2B caption matching)
-#   4. Train Stage 2: text → LEGO JSON (ST2B-only, structure-aware loss)
-#   5. Train Stage 1: image → description (COCO + Rebrickable)
+#   1. Download COCO 2017 data (if not already present)
+#   2. Build Stage 1 manifest (COCO + ST2B caption matching)
+#   3. Train Stage 2: text → brick coordinates (Qwen3.5-4B + LoRA)
+#   4. Train Stage 1: image → description (Qwen3.5-9B + LoRA)
 #
 # Usage:
 #   bash scripts/train_full_pipeline.sh              # run everything
@@ -60,25 +59,10 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || err "No GPU fo
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════
-# STEP 1: Preprocess ST2B labels (add grid_pos)
-# ══════════════════════════════════════════════════════════════════════
-if [ "$STAGE1_ONLY" = false ]; then
-    log "Step 1/5: Adding grid_pos to ST2B labels"
-
-    # Check if already processed (sample a file for grid_pos)
-    SAMPLE=$(find data/st2b_labels -name '*.json' -print -quit 2>/dev/null)
-    if [ -n "$SAMPLE" ] && python3 -c "import json; d=json.load(open('$SAMPLE')); assert 'grid_pos' in d.get('subassemblies',[{}])[0].get('parts',[{}])[0]" 2>/dev/null; then
-        echo "grid_pos already present, skipping."
-    else
-        python -m backend.data_pipeline.add_grid_pos
-    fi
-fi
-
-# ══════════════════════════════════════════════════════════════════════
-# STEP 2: Download COCO 2017 (annotations + images)
+# STEP 1: Download COCO 2017 (annotations + images)
 # ══════════════════════════════════════════════════════════════════════
 if [ "$STAGE2_ONLY" = false ] && [ "$SKIP_COCO" = false ]; then
-    log "Step 2/5: Downloading COCO 2017 data"
+    log "Step 1/4: Downloading COCO 2017 data"
 
     COCO_DIR="$PROJECT_ROOT/data/coco"
     mkdir -p "$COCO_DIR"
@@ -109,10 +93,10 @@ if [ "$STAGE2_ONLY" = false ] && [ "$SKIP_COCO" = false ]; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# STEP 3: Build Stage 1 manifest
+# STEP 2: Build Stage 1 manifest
 # ══════════════════════════════════════════════════════════════════════
 if [ "$STAGE2_ONLY" = false ]; then
-    log "Step 3/5: Building Stage 1 training manifest"
+    log "Step 2/4: Building Stage 1 training manifest"
 
     if [ -f "data/stage1_manifest.json" ]; then
         COUNT=$(python3 -c "import json; print(len(json.load(open('data/stage1_manifest.json'))))")
@@ -123,19 +107,19 @@ if [ "$STAGE2_ONLY" = false ]; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# STEP 4: Train Stage 2 (text → LEGO JSON)
+# STEP 3: Train Stage 2 (text → brick coordinates)
 # ══════════════════════════════════════════════════════════════════════
 if [ "$STAGE1_ONLY" = false ]; then
-    log "Step 4/5: Training Stage 2 (text → LEGO JSON)"
-    echo "Model: Qwen3.5-9B + LoRA rank 128"
-    echo "Data: ST2B-only (~46k samples), structure-aware loss"
-    echo "Output: backend/models/checkpoints/qwen35-9b-lego-stage2-lora/"
+    log "Step 3/4: Training Stage 2 (text → brick coordinates)"
+    echo "Model: Qwen3.5-4B + LoRA"
+    echo "Data: StableText2Brick (text → colored brick sequence)"
+    echo "Output: backend/models/checkpoints/qwen35-4b-brick-lora/"
     echo ""
 
-    STAGE2_DIR="backend/models/checkpoints/qwen35-9b-lego-stage2-lora"
+    STAGE2_DIR="backend/models/checkpoints/qwen35-4b-brick-lora"
     mkdir -p "$STAGE2_DIR"
 
-    python -m backend.training.train_unified \
+    python -m backend.training.train_brick \
         --output-dir "$STAGE2_DIR" \
         --epochs 3 \
         $WANDB_FLAG \
@@ -147,10 +131,10 @@ if [ "$STAGE1_ONLY" = false ]; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# STEP 5: Train Stage 1 (image → description)
+# STEP 4: Train Stage 1 (image → description)
 # ══════════════════════════════════════════════════════════════════════
 if [ "$STAGE2_ONLY" = false ]; then
-    log "Step 5/5: Training Stage 1 (image → description)"
+    log "Step 4/4: Training Stage 1 (image → description)"
     echo "Model: Qwen3.5-9B + LoRA rank 32"
     echo "Data: COCO + Rebrickable images"
     echo "Output: backend/models/checkpoints/qwen35-9b-lego-stage1-lora/"
@@ -175,11 +159,8 @@ fi
 log "All training complete! Total time: $(elapsed)"
 echo ""
 echo "Checkpoints:"
-echo "  Stage 2: backend/models/checkpoints/qwen35-9b-lego-stage2-lora/"
+echo "  Stage 2: backend/models/checkpoints/qwen35-4b-brick-lora/"
 echo "  Stage 1: backend/models/checkpoints/qwen35-9b-lego-stage1-lora/"
 echo ""
 echo "To start the server with new checkpoints:"
 echo "  LEGOGEN_DEV=0 uvicorn backend.app:app --host 0.0.0.0 --port 8000"
-echo ""
-echo "Update backend/config.py if checkpoint paths differ:"
-echo "  UNIFIED_CHECKPOINT_DIR = CHECKPOINT_DIR / 'qwen35-9b-lego-stage2-lora'"
