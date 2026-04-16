@@ -232,3 +232,24 @@ def test_mock_generate_best_of_n_returns_valid_shape():
     assert "bricks" in out and "brick_count" in out and "stable" in out
     assert out["metadata"]["n"] == 4
     assert out["metadata"]["picked_index"] in range(4)
+
+
+def test_generate_best_of_n_strips_bricks_parsed_from_returned_dict():
+    """Regression test: bricks_parsed is an internal-only key and must not
+    leak onto the returned dict (breaks FastAPI JSON serialization)."""
+    from backend.inference.brick_pipeline import BrickPipeline
+
+    # Use __new__ to skip __init__ (which loads torch/models). We override
+    # just the methods generate_best_of_n needs.
+    pipe = BrickPipeline.__new__(BrickPipeline)
+    pipe.generate = lambda caption, on_progress=None: {
+        "bricks": "2x4 (0,0,0) #C91A09\n2x4 (0,0,1) #C91A09",
+        "brick_count": 2,
+        "stable": True,
+        "metadata": {"model_version": "stub"},
+    }
+
+    out = pipe.generate_best_of_n("test", n=2, strategy="rank")
+    assert "bricks_parsed" not in out
+    assert isinstance(out["bricks"], str)
+    assert out["metadata"]["n"] == 2

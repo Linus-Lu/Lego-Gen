@@ -194,6 +194,7 @@ class BrickPipeline:
 
         # Restore the serialized "bricks" string on the returned dict.
         picked["bricks"] = "\n".join(serialize_brick(b) for b in picked["bricks"])
+        picked.pop("bricks_parsed", None)
         picked.setdefault("metadata", {})
         picked["metadata"]["n"] = n
         picked["metadata"]["picked_index"] = picked_index
