@@ -45,6 +45,7 @@ frontend/.env.*
 *.swo
 .claude/
 .vite/
+.worktrees/
 
 # OS
 .DS_Store
