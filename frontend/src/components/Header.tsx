@@ -1,58 +1,47 @@
 import { Link, useLocation } from 'react-router-dom';
 
-const Header: React.FC = () => {
-  const location = useLocation();
+const NAV = [
+  { to: '/',        label: 'INDEX',   id: '00' },
+  { to: '/build',   label: 'BUILD',   id: '01' },
+  { to: '/explore', label: 'ARCHIVE', id: '02' },
+  { to: '/about',   label: 'SPEC',    id: '03' },
+];
 
-  const navLink = (to: string, label: string) => {
-    const isActive = location.pathname === to;
-    return (
-      <li>
-        <Link
-          to={to}
-          className={`relative px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
-            isActive
-              ? 'text-white bg-white/10'
-              : 'text-gray-400 hover:text-white hover:bg-white/5'
-          }`}
-        >
-          {label}
-          {isActive && (
-            <span className="absolute -bottom-[13px] left-1/2 -translate-x-1/2 w-6 h-0.5 bg-blue-500 rounded-full" />
-          )}
-        </Link>
-      </li>
-    );
-  };
-
+export default function Header() {
+  const { pathname } = useLocation();
   return (
-    <header className="glass sticky top-0 z-50 border-b border-white/5">
-      <div className="container mx-auto px-4 py-3 flex justify-between items-center">
+    <header className="relative z-10 border-b border-[var(--color-line)] bg-[var(--color-ink-1)]/80 backdrop-blur-sm">
+      <div className="max-w-[1440px] mx-auto px-6 md:px-10 h-14 flex items-center justify-between">
         <Link to="/" className="flex items-center gap-2 group">
-          {/* LEGO brick icon */}
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-lego-red to-lego-orange flex items-center justify-center shadow-lg shadow-lego-red/20 group-hover:shadow-lego-red/40 transition-shadow">
-            <div className="grid grid-cols-2 gap-0.5">
-              <div className="w-1.5 h-1.5 rounded-full bg-white/80" />
-              <div className="w-1.5 h-1.5 rounded-full bg-white/80" />
-              <div className="w-1.5 h-1.5 rounded-full bg-white/80" />
-              <div className="w-1.5 h-1.5 rounded-full bg-white/80" />
-            </div>
+          <div className="w-6 h-6 border border-[var(--color-acid)] grid place-items-center">
+            <div className="w-2 h-2 bg-[var(--color-acid)] group-hover:animate-pulse-acid" />
           </div>
-          <span className="text-xl font-bold text-gradient tracking-tight">
-            LegoGen
+          <span className="mono text-[13px] tracking-[0.18em] text-[var(--color-fg-strong)]">
+            LEGO<span className="text-[var(--color-acid)]">//</span>GEN
           </span>
+          <span className="tick hidden md:inline ml-2">v0.2 · two-stage</span>
         </Link>
 
-        <nav>
-          <ul className="flex items-center gap-1">
-            {navLink('/', 'Home')}
-            {navLink('/build', 'Build')}
-            {navLink('/explore', 'Explore')}
-            {navLink('/about', 'About')}
-          </ul>
+        <nav className="flex items-center">
+          {NAV.map(n => {
+            const active = n.to === '/' ? pathname === '/' : pathname.startsWith(n.to);
+            return (
+              <Link
+                key={n.to}
+                to={n.to}
+                className={`mono text-[11px] tracking-[0.16em] uppercase px-3 py-2 border-b-2 transition-colors ${
+                  active
+                    ? 'border-[var(--color-acid)] text-[var(--color-fg-strong)]'
+                    : 'border-transparent text-[var(--color-mute)] hover:text-[var(--color-fg)]'
+                }`}
+              >
+                <span className="text-[var(--color-acid)] mr-1.5 opacity-60">{n.id}</span>
+                {n.label}
+              </Link>
+            );
+          })}
         </nav>
       </div>
     </header>
   );
-};
-
-export default Header;
+}

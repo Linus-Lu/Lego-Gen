@@ -1,66 +1,80 @@
-import React, { useCallback, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 interface UploadPanelProps {
-  onFileSelected: (file: File) => void;
+  onFileSelected: (file: File | null) => void;
+  file?: File | null;
 }
 
-const UploadPanel: React.FC<UploadPanelProps> = ({ onFileSelected }) => {
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [fileName, setFileName] = useState<string | null>(null);
+export default function UploadPanel({ onFileSelected, file }: UploadPanelProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
+  const [preview, setPreview] = useState<string | null>(null);
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      const file = e.dataTransfer.files[0];
-      setFileName(file.name);
-      onFileSelected(file);
-      e.dataTransfer.clearData();
-    }
+  const take = useCallback((f: File) => {
+    setPreview(URL.createObjectURL(f));
+    onFileSelected(f);
   }, [onFileSelected]);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      const file = e.target.files[0];
-      setFileName(file.name);
-      onFileSelected(file);
-    }
-  };
-
-  const handleClick = () => {
-    fileInputRef.current?.click();
-  };
-
   return (
-    <div
-      className="relative border border-dashed border-gray-600 bg-gray-800 rounded-xl p-3 text-center hover:border-blue-500 hover:bg-gray-700 transition cursor-pointer group h-full flex flex-col items-center justify-center min-w-[80px] md:min-w-[100px]"
-      role="button"
-      tabIndex={0}
-      aria-label="Upload an image by clicking or dragging"
-      onDrop={handleDrop}
-      onDragOver={(e) => e.preventDefault()}
-      onClick={handleClick}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleClick(); } }}
-    >
-      <input
-        type="file"
-        ref={fileInputRef}
-        onChange={handleFileChange}
-        className="hidden"
-        accept="image/*"
-        aria-label="Select image file"
-      />
-      <div className="text-2xl mb-1 group-hover:scale-110 transition-transform">📷</div>
-      {fileName ? (
-        <div className="w-full">
-            <p className="text-[10px] text-blue-400 font-medium truncate max-w-full px-1">{fileName}</p>
-        </div>
-      ) : (
-        <div className="hidden md:block">
-            <p className="text-[10px] text-gray-400 font-medium">Upload</p>
-        </div>
-      )}
+    <div className="h-full">
+      <p className="label mb-2">INPUT.IMG <span className="text-[var(--color-acid)]">— optional</span></p>
+      <div
+        className={`relative h-[220px] bp-frame-4 border transition-colors cursor-pointer overflow-hidden ${
+          dragging ? 'border-[var(--color-acid)] bg-[var(--color-ink-3)]' : 'border-[var(--color-line)] bg-[var(--color-ink-2)] hover:border-[var(--color-line-2)]'
+        }`}
+        onDragOver={e => { e.preventDefault(); setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={e => {
+          e.preventDefault();
+          setDragging(false);
+          const f = e.dataTransfer.files?.[0];
+          if (f) take(f);
+        }}
+        onClick={() => inputRef.current?.click()}
+      >
+        <span className="bp-corner-tl" />
+        <span className="bp-corner-br" />
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={e => e.target.files?.[0] && take(e.target.files[0])}
+        />
+        {preview && file ? (
+          <>
+            <img src={preview} alt="" className="w-full h-full object-cover opacity-70" />
+            <div className="absolute inset-0 bg-gradient-to-t from-[var(--color-ink-1)] to-transparent" />
+            <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between">
+              <span className="mono text-[11px] text-[var(--color-fg-strong)] truncate max-w-[70%]">
+                {file.name}
+              </span>
+              <button
+                type="button"
+                onClick={e => {
+                  e.stopPropagation();
+                  setPreview(null);
+                  onFileSelected(null);
+                }}
+                className="mono text-[10px] tracking-[0.2em] uppercase text-[var(--color-danger)] hover:text-white px-2 py-1 border border-[var(--color-danger)]/40 hover:bg-[var(--color-danger)]"
+              >
+                × clear
+              </button>
+            </div>
+          </>
+        ) : (
+          <div className="absolute inset-0 grid place-items-center text-center">
+            <div>
+              <p className="mono text-[11px] tracking-[0.2em] text-[var(--color-mute)] uppercase mb-3">
+                Drop image here<span className="caret" />
+              </p>
+              <p className="mono text-[10px] tracking-[0.14em] text-[var(--color-dim)] uppercase">
+                JPG / PNG / WEBP · ≤ 8MB
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
-};
-
-export default UploadPanel;
+}

@@ -4,101 +4,143 @@ import { OrbitControls, Grid } from '@react-three/drei';
 import BrickMesh from './BrickMesh';
 import type { BrickCoord } from '../api/legogen';
 
-interface BrickCoordViewerProps {
-  bricks: BrickCoord[];
-  /** Z-levels array (sorted), one per step. */
-  zLevels?: number[];
-  /** 1-indexed current step. */
-  currentStep?: number;
-}
-
 const STUD = 1.0;
 const BRICK_H = 1.0;
 
-function Scene({ bricks, zLevels, currentStep }: BrickCoordViewerProps) {
+interface BrickCoordViewerProps {
+  bricks: BrickCoord[];
+  /** Ordered z-levels (one per step). Required for step-wise reveal. */
+  zLevels?: number[];
+  /** 1-indexed step. When set, bricks at z ≤ zLevels[currentStep-1] render solid. */
+  currentStep?: number;
+  /** If true, ghosts future-layer bricks at low opacity. */
+  showFuture?: boolean;
+  /** Disable orbit controls (useful for thumbnails). */
+  frozen?: boolean;
+  /** Force camera position. */
+  camera?: [number, number, number];
+  /** Enable / disable the grid plane. */
+  showGrid?: boolean;
+}
+
+function Scene({
+  bricks, zLevels, currentStep, showFuture, showGrid,
+}: Omit<BrickCoordViewerProps, 'frozen' | 'camera'>) {
   const placed = useMemo(() => {
     if (!bricks.length) return [];
 
-    // Determine which z-level corresponds to the current step
-    const maxVisibleZ = (zLevels && currentStep != null)
-      ? (zLevels[currentStep - 1] ?? Infinity)
-      : Infinity;
-    const currentZ = (zLevels && currentStep != null)
-      ? (zLevels[currentStep - 1] ?? -1)
-      : -1;
+    const atStep = zLevels && currentStep != null ? zLevels[currentStep - 1] : undefined;
+    const currentZ = atStep ?? -1;
+    const maxSolidZ = atStep ?? Infinity;
 
-    const positions = bricks
-      .filter(b => b.z <= maxVisibleZ)
-      .map(b => ({
-        position: [
-          (b.x + b.h / 2) * STUD,
-          b.z * BRICK_H + BRICK_H / 2,
-          (b.y + b.w / 2) * STUD,
-        ] as [number, number, number],
-        size: [b.h * STUD, BRICK_H, b.w * STUD] as [number, number, number],
-        color: b.color,
-        isCurrent: b.z === currentZ,
-      }));
-
-    // Center around origin using ALL bricks (not just visible) for stable framing
-    const allPositions = bricks.map(b => [
+    // For framing, use ALL bricks so camera stays stable between steps.
+    const all = bricks.map(b => [
       (b.x + b.h / 2) * STUD,
       b.z * BRICK_H + BRICK_H / 2,
       (b.y + b.w / 2) * STUD,
     ]);
-    const allX = allPositions.map(p => p[0]);
-    const allY = allPositions.map(p => p[1]);
-    const allZ = allPositions.map(p => p[2]);
-    const cx = (Math.min(...allX) + Math.max(...allX)) / 2;
-    const cy = Math.min(...allY);
-    const cz = (Math.min(...allZ) + Math.max(...allZ)) / 2;
+    const xs = all.map(p => p[0]);
+    const ys = all.map(p => p[1]);
+    const zs = all.map(p => p[2]);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const cy = Math.min(...ys);
+    const cz = (Math.min(...zs) + Math.max(...zs)) / 2;
 
-    return positions.map((p, i) => ({
-      ...p,
-      position: [p.position[0] - cx, p.position[1] - cy, p.position[2] - cz] as [number, number, number],
-      key: `brick-${i}`,
-    }));
-  }, [bricks, zLevels, currentStep]);
+    return bricks
+      .filter(b => (showFuture ? true : b.z <= maxSolidZ))
+      .map((b, i) => {
+        const isCurrent = b.z === currentZ;
+        const isPast = b.z < currentZ;
+        const isFuture = b.z > maxSolidZ;
+        let opacity = 1;
+        if (atStep != null) {
+          if (isCurrent) opacity = 1;
+          else if (isPast) opacity = 0.6;
+          else if (isFuture) opacity = 0.12;
+        }
+        return {
+          key: `brick-${i}`,
+          position: [
+            (b.x + b.h / 2) * STUD - cx,
+            b.z * BRICK_H + BRICK_H / 2 - cy,
+            (b.y + b.w / 2) * STUD - cz,
+          ] as [number, number, number],
+          size: [b.h * STUD, BRICK_H, b.w * STUD] as [number, number, number],
+          color: b.color,
+          opacity,
+          wireframe: isFuture,
+        };
+      });
+  }, [bricks, zLevels, currentStep, showFuture]);
 
   return (
     <>
-      <ambientLight intensity={0.5} />
-      <directionalLight position={[8, 12, 6]} intensity={1.2} castShadow />
-      <directionalLight position={[-4, 8, -6]} intensity={0.3} />
-      <Grid args={[20, 20]} cellSize={1} cellThickness={0.5} cellColor="#334155"
-        sectionSize={4} sectionThickness={1} sectionColor="#475569"
-        fadeDistance={25} position={[0, -0.01, 0]} />
+      <ambientLight intensity={0.45} />
+      <directionalLight position={[10, 14, 8]} intensity={1.25} castShadow />
+      <directionalLight position={[-6, 8, -6]} intensity={0.35} color="#6cc2ff" />
+      {showGrid !== false && (
+        <Grid
+          args={[30, 30]}
+          cellSize={1}
+          cellThickness={0.4}
+          cellColor="#1e242e"
+          sectionSize={5}
+          sectionThickness={0.9}
+          sectionColor="#2a313d"
+          fadeDistance={28}
+          infiniteGrid
+          position={[0, -0.01, 0]}
+        />
+      )}
       {placed.map(b => (
-        <BrickMesh key={b.key} position={b.position} size={b.size}
-          color={b.color} isTrans={false}
-          opacity={b.isCurrent ? 1.0 : 0.35} />
+        <BrickMesh {...b} />
       ))}
-      <OrbitControls makeDefault enableDamping dampingFactor={0.1}
-        minDistance={3} maxDistance={30} />
+      <OrbitControls
+        makeDefault
+        enableDamping
+        dampingFactor={0.12}
+        minDistance={3}
+        maxDistance={40}
+      />
     </>
   );
 }
 
-const BrickCoordViewer: React.FC<BrickCoordViewerProps> = ({ bricks, zLevels, currentStep }) => {
+export default function BrickCoordViewer({
+  bricks, zLevels, currentStep, showFuture, frozen, camera, showGrid,
+}: BrickCoordViewerProps) {
   if (!bricks.length) {
     return (
-      <div className="w-full h-full bg-gray-800 rounded-lg flex items-center justify-center min-h-[300px] border-2 border-dashed border-gray-700">
-        <div className="text-center text-gray-500">
-          <p className="font-medium">3D Brick View</p>
-          <p className="text-xs mt-2">Generate a model to see the 3D build</p>
+      <div className="relative w-full h-full bp-grid-dense border border-[var(--color-line)] overflow-hidden">
+        <div className="absolute inset-0 grid place-items-center">
+          <div className="text-center">
+            <p className="mono text-[10px] tracking-[0.2em] uppercase text-[var(--color-mute)] mb-2">
+              VIEWPORT // EMPTY
+            </p>
+            <p className="mono text-[13px] text-[var(--color-fg-strong)]">
+              awaiting build stream<span className="caret" />
+            </p>
+          </div>
         </div>
       </div>
     );
   }
+
+  const cam = camera ?? [12, 10, 12];
   return (
-    <div className="w-full h-full rounded-lg overflow-hidden bg-[#1a1a2e]">
-      <Canvas camera={{ position: [12, 10, 12], fov: 45 }} shadows gl={{ antialias: true }}>
-        <color attach="background" args={['#1a1a2e']} />
-        <fog attach="fog" args={['#1a1a2e', 20, 40]} />
-        <Scene bricks={bricks} zLevels={zLevels} currentStep={currentStep} />
+    <div className="relative w-full h-full bg-[var(--color-ink-1)] overflow-hidden">
+      <Canvas camera={{ position: cam, fov: 42 }} shadows gl={{ antialias: true }}>
+        <color attach="background" args={['#0a0c10']} />
+        <fog attach="fog" args={['#0a0c10', 22, 46]} />
+        <Scene
+          bricks={bricks}
+          zLevels={zLevels}
+          currentStep={currentStep}
+          showFuture={showFuture}
+          showGrid={showGrid}
+        />
+        {frozen && null}
       </Canvas>
     </div>
   );
-};
-
-export default BrickCoordViewer;
+}
