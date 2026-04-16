@@ -120,10 +120,18 @@ class TestGenerateLoop:
 
         pipeline._generate_one_brick = mock_generate_one
 
-        # Mock tokenizer with minimal interface
+        # Mock tokenizer. encode() behaves differently depending on kwargs:
+        #   - return_tensors="pt"  -> 2-D tensor (for the initial prompt)
+        #   - otherwise            -> plain list (for per-brick appends,
+        #     which are then wrapped into a tensor by the caller)
+        def mock_encode(text, return_tensors=None, add_special_tokens=True):
+            if return_tensors == "pt":
+                return torch.tensor([[1, 2, 3]])
+            return [4, 5]
+
         mock_tok = MagicMock()
         mock_tok.apply_chat_template.return_value = "mock prompt"
-        mock_tok.encode.return_value = [1, 2, 3]
+        mock_tok.encode.side_effect = mock_encode
         mock_tok.pad_token_id = 0
         mock_tok.eos_token_id = 2
         pipeline.tokenizer = mock_tok
