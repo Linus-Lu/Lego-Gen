@@ -153,3 +153,24 @@ class TestGalleryDB:
             assert await update_star("nonexistent", 5) is None
 
         _run(_test())
+
+    def test_update_star_concurrent_accounts_every_vote(self, gallery_db_path):
+        """Concurrent PATCHes must not silently drop votes.
+
+        The previous read-modify-write form could overlap two SELECTs
+        against the same pre-update state and lose one UPDATE. The atomic
+        UPDATE must increment star_count for every awaited call.
+        """
+        async def _test():
+            await init_db()
+            build = await create_build(**_make("Y"))
+            bid = build["id"]
+            ratings = [5, 4, 3, 2, 1, 5, 4, 3, 2, 1]
+
+            await asyncio.gather(*(update_star(bid, r) for r in ratings))
+
+            final = await get_build(bid)
+            assert final["star_count"] == len(ratings)
+            assert final["stars"] == pytest.approx(sum(ratings) / len(ratings))
+
+        _run(_test())

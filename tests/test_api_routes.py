@@ -161,6 +161,26 @@ class TestGallery:
         resp = client.get("/api/gallery/nonexistent_id")
         assert resp.status_code == 404
 
+    def test_stable_is_bool_across_list_and_get(self, client):
+        """Both endpoints must serialize ``stable`` as a JSON boolean."""
+        created = client.post(
+            "/api/gallery",
+            json={
+                "title": "Type Check",
+                "caption": "test",
+                "bricks": "1x1 (0,0,0) #FFFFFF",
+                "brick_count": 1,
+                "stable": True,
+            },
+        ).json()
+
+        listed = client.get("/api/gallery").json()
+        assert isinstance(listed, list) and listed, "expected at least one build"
+        assert isinstance(listed[0]["stable"], bool)
+
+        got = client.get(f"/api/gallery/{created['id']}").json()
+        assert isinstance(got["stable"], bool)
+
     def test_star_build(self, client):
         created = client.post(
             "/api/gallery",
