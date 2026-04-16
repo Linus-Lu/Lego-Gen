@@ -25,18 +25,28 @@ except ImportError:
 
 pytestmark = pytest.mark.skipif(not _AIOSQLITE, reason="aiosqlite not installed")
 
+SAMPLE_BRICKS = "2x4 (0,0,0) #C91A09\n2x4 (2,0,0) #C91A09"
+
 
 def _run(coro):
-    """Helper to run an async coroutine from a sync test."""
     return asyncio.run(coro)
 
 
+def _make(title: str, **overrides) -> dict:
+    kwargs = dict(
+        title=title,
+        caption="a small red house",
+        bricks=SAMPLE_BRICKS,
+        brick_count=2,
+        stable=True,
+        thumbnail_b64="",
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
 class TestGalleryDB:
-    """All gallery_db tests use the gallery_db_path fixture for isolation."""
-
     def test_init_db_idempotent(self, gallery_db_path):
-        """Two init_db calls should not error."""
-
         async def _test():
             await init_db()
             await init_db()
@@ -46,21 +56,13 @@ class TestGalleryDB:
     def test_create_build_returns_all_fields(self, gallery_db_path):
         async def _test():
             await init_db()
-            build = await create_build(
-                title="Test House",
-                category="City",
-                complexity="simple",
-                parts_count=20,
-                description_json='{"object": "House"}',
-                thumbnail_b64="abc123",
-            )
+            build = await create_build(**_make("Test House"))
             assert build is not None
             assert build["title"] == "Test House"
-            assert build["category"] == "City"
-            assert build["complexity"] == "simple"
-            assert build["parts_count"] == 20
-            assert build["description_json"] == '{"object": "House"}'
-            assert build["thumbnail_b64"] == "abc123"
+            assert build["caption"] == "a small red house"
+            assert build["bricks"] == SAMPLE_BRICKS
+            assert build["brick_count"] == 2
+            assert build["stable"] is True
             assert "id" in build
             assert "created_at" in build
 
@@ -69,99 +71,85 @@ class TestGalleryDB:
     def test_create_build_unique_ids(self, gallery_db_path):
         async def _test():
             await init_db()
-            b1 = await create_build("A", "Cat", "simple", 1, "{}", "")
-            b2 = await create_build("B", "Cat", "simple", 2, "{}", "")
+            b1 = await create_build(**_make("A"))
+            b2 = await create_build(**_make("B"))
             assert b1["id"] != b2["id"]
-            assert len(b1["id"]) == 12  # uuid hex[:12]
+            assert len(b1["id"]) == 12
 
         _run(_test())
 
     def test_get_build_existing(self, gallery_db_path):
         async def _test():
             await init_db()
-            created = await create_build("X", "Tech", "advanced", 100, "{}", "")
+            created = await create_build(**_make("X"))
             fetched = await get_build(created["id"])
             assert fetched is not None
             assert fetched["id"] == created["id"]
-            assert fetched["title"] == "X"
+            assert fetched["stable"] is True
 
         _run(_test())
 
     def test_get_build_nonexistent(self, gallery_db_path):
         async def _test():
             await init_db()
-            result = await get_build("does_not_exist")
-            assert result is None
+            assert await get_build("does_not_exist") is None
 
         _run(_test())
 
     def test_list_builds_returns_all(self, gallery_db_path):
         async def _test():
             await init_db()
-            await create_build("A", "City", "simple", 10, "{}", "")
-            await create_build("B", "Space", "advanced", 50, "{}", "")
-            builds = await list_builds()
-            assert len(builds) == 2
+            await create_build(**_make("A"))
+            await create_build(**_make("B"))
+            assert len(await list_builds()) == 2
 
         _run(_test())
 
-    def test_list_builds_filter_category(self, gallery_db_path):
+    def test_list_builds_search_caption(self, gallery_db_path):
         async def _test():
             await init_db()
-            await create_build("A", "City", "simple", 10, "{}", "")
-            await create_build("B", "Space", "advanced", 50, "{}", "")
-            builds = await list_builds(category="City")
+            await create_build(**_make("Red House", caption="red brick cottage"))
+            await create_build(**_make("Blue Car", caption="compact blue vehicle"))
+            builds = await list_builds(q="cottage")
             assert len(builds) == 1
-            assert builds[0]["category"] == "City"
+            assert builds[0]["title"] == "Red House"
 
         _run(_test())
 
-    def test_list_builds_search_query(self, gallery_db_path):
+    def test_list_builds_sort_by_bricks(self, gallery_db_path):
         async def _test():
             await init_db()
-            await create_build("Red House", "City", "simple", 10, "{}", "")
-            await create_build("Blue Car", "City", "simple", 15, "{}", "")
-            builds = await list_builds(q="House")
-            assert len(builds) == 1
-            assert "House" in builds[0]["title"]
+            await create_build(**_make("Small", brick_count=5))
+            await create_build(**_make("Big", brick_count=200))
+            by_bricks = await list_builds(sort="bricks")
+            assert by_bricks[0]["brick_count"] >= by_bricks[1]["brick_count"]
 
         _run(_test())
 
-    def test_list_builds_sort_options(self, gallery_db_path):
+    def test_unstable_build_persists_flag(self, gallery_db_path):
         async def _test():
             await init_db()
-            await create_build("Small", "City", "simple", 5, "{}", "")
-            await create_build("Big", "City", "advanced", 200, "{}", "")
-
-            by_parts = await list_builds(sort="parts")
-            assert by_parts[0]["parts_count"] >= by_parts[1]["parts_count"]
+            created = await create_build(**_make("Wobbly", stable=False))
+            assert created["stable"] is False
+            refetched = await get_build(created["id"])
+            assert refetched["stable"] is False
 
         _run(_test())
 
     def test_update_star_running_average(self, gallery_db_path):
         async def _test():
             await init_db()
-            build = await create_build("X", "City", "simple", 10, "{}", "")
+            build = await create_build(**_make("X"))
             bid = build["id"]
-
-            # First star: avg = (0*0 + 5) / (0 + 1) = 5.0
-            updated = await update_star(bid, 5)
-            assert updated["stars"] == pytest.approx(5.0)
-
-            # Second star: avg = (5.0*1 + 3) / (1 + 1) = 4.0
-            updated = await update_star(bid, 3)
-            assert updated["stars"] == pytest.approx(4.0)
-
-            # Third star: avg = (4.0*2 + 1) / (2 + 1) = 3.0
-            updated = await update_star(bid, 1)
-            assert updated["stars"] == pytest.approx(3.0)
+            assert (await update_star(bid, 5))["stars"] == pytest.approx(5.0)
+            assert (await update_star(bid, 3))["stars"] == pytest.approx(4.0)
+            assert (await update_star(bid, 1))["stars"] == pytest.approx(3.0)
 
         _run(_test())
 
     def test_update_star_nonexistent(self, gallery_db_path):
         async def _test():
             await init_db()
-            result = await update_star("nonexistent", 5)
-            assert result is None
+            assert await update_star("nonexistent", 5) is None
 
         _run(_test())

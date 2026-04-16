@@ -1,6 +1,5 @@
 """Gallery CRUD endpoints."""
 
-import json
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -16,11 +15,12 @@ from backend.storage.gallery_db import (
 router = APIRouter(prefix="/api", tags=["gallery"])
 
 
-# ── Request models ────────────────────────────────────────────────────
-
 class CreateBuildRequest(BaseModel):
     title: str
-    description_json: str
+    caption: str = ""
+    bricks: str
+    brick_count: int = 0
+    stable: bool = True
     thumbnail_b64: str = ""
 
 
@@ -28,40 +28,26 @@ class StarRequest(BaseModel):
     stars: int = Field(ge=1, le=5)
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────
-
 @router.get("/gallery")
 async def list_gallery(
-    category: Optional[str] = None,
     sort: str = "newest",
     q: Optional[str] = None,
 ):
-    return await list_builds(category=category, sort=sort, q=q)
+    return await list_builds(sort=sort, q=q)
 
 
 @router.post("/gallery", status_code=201)
 async def create_gallery_build(req: CreateBuildRequest):
-    # Derive category, complexity, parts_count from description_json
-    category = ""
-    complexity = "medium"
-    parts_count = 0
-    try:
-        desc = json.loads(req.description_json)
-        category = desc.get("category", "")
-        complexity = desc.get("complexity", "medium")
-        parts_count = desc.get("total_parts", 0)
-    except (json.JSONDecodeError, AttributeError):
-        pass
-
-    build = await create_build(
+    if not req.bricks.strip():
+        raise HTTPException(status_code=400, detail="bricks must not be empty")
+    return await create_build(
         title=req.title,
-        category=category,
-        complexity=complexity,
-        parts_count=parts_count,
-        description_json=req.description_json,
+        caption=req.caption,
+        bricks=req.bricks,
+        brick_count=req.brick_count,
+        stable=req.stable,
         thumbnail_b64=req.thumbnail_b64,
     )
-    return build
 
 
 @router.get("/gallery/{build_id}")

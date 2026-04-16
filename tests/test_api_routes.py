@@ -121,18 +121,28 @@ class TestGallery:
     def test_create_and_get_build(self, client):
         payload = {
             "title": "My House",
-            "description_json": "{}",
-            "thumbnail_b64": "",
+            "caption": "a small red house",
+            "bricks": "2x4 (0,0,0) #C91A09",
+            "brick_count": 1,
+            "stable": True,
         }
         resp = client.post("/api/gallery", json=payload)
         assert resp.status_code == 201
         data = resp.json()
         assert data["title"] == "My House"
+        assert data["bricks"] == payload["bricks"]
         assert "id" in data
 
         got = client.get(f"/api/gallery/{data['id']}")
         assert got.status_code == 200
         assert got.json()["title"] == "My House"
+
+    def test_empty_bricks_rejected(self, client):
+        resp = client.post(
+            "/api/gallery",
+            json={"title": "Empty", "caption": "", "bricks": ""},
+        )
+        assert resp.status_code == 400
 
     def test_get_nonexistent_returns_404(self, client):
         resp = client.get("/api/gallery/nonexistent_id")
@@ -141,7 +151,12 @@ class TestGallery:
     def test_star_build(self, client):
         created = client.post(
             "/api/gallery",
-            json={"title": "Star Test", "description_json": "{}"},
+            json={
+                "title": "Star Test",
+                "caption": "test",
+                "bricks": "1x1 (0,0,0) #FFFFFF",
+                "brick_count": 1,
+            },
         ).json()
         resp = client.patch(
             f"/api/gallery/{created['id']}/star", json={"stars": 5}
