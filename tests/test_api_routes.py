@@ -97,6 +97,12 @@ class TestGenerateBricks:
         assert body["metadata"]["n"] == 4
         assert "picked_index" in body["metadata"]
 
+    def test_generate_bricks_rejects_out_of_range_n(self, client):
+        resp = client.post("/api/generate-bricks", data={"prompt": "test", "n": "100"})
+        assert resp.status_code == 422
+        resp = client.post("/api/generate-bricks", data={"prompt": "test", "n": "0"})
+        assert resp.status_code == 422
+
 
 class TestGenerateStream:
     def test_image_stream_emits_events(self, client):

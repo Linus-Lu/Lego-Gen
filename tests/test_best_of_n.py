@@ -54,3 +54,15 @@ def test_cluster_and_pick_returns_centroid_of_largest_valid_cluster():
     assert picked in big_cluster
     # Prefer the centroid — should be the candidate closest to cluster mean count (10).
     assert picked["brick_count"] == 10
+
+
+def test_cluster_and_pick_falls_back_to_rank_when_stable_equals_k():
+    """When len(stable) <= k, KMeans degenerates to singleton clusters and
+    the centroid pick is driven only by init seed. Fall back to rank instead."""
+    cands = [
+        {"bricks": [Brick(2, 4, 0, 0, 0, "C91A09")] * 5, "stable": True, "brick_count": 5},
+        {"bricks": [Brick(2, 4, 0, 0, 0, "C91A09")] * 8, "stable": True, "brick_count": 8},
+    ]
+    picked = cluster_and_pick(cands, k=2, seed=0)
+    # Rank picks the larger stable build.
+    assert picked["brick_count"] == 8

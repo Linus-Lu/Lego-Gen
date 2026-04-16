@@ -33,13 +33,16 @@ def _decode_image(contents: bytes) -> Image.Image:
 async def generate_bricks(
     image: UploadFile = File(default=None),
     prompt: str = Form(default=""),
-    n: int = Form(default=1),
+    n: int = Form(default=1, ge=1, le=16),
 ):
     """Image or text → brick-coordinate model. Non-streaming.
 
     If n > 1, runs Best-of-N sampling and returns the picked candidate. The
     response shape is unchanged; n/picked_index/stable_rate are stamped on
-    metadata.
+    metadata. n is capped at 16 because each inner sample is a full model
+    generation (~15–60s on the 4-bit Qwen3.5-4B) and `asyncio.wait_for`
+    cannot cancel the executor thread — so unbounded n would monopolize
+    the threadpool long after the client 504s.
     """
     pipeline = get_brick_pipeline()
     loop = asyncio.get_event_loop()

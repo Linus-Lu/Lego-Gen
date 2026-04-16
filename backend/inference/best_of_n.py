@@ -69,10 +69,12 @@ def cluster_and_pick(candidates: list[dict], k: int = 2, seed: int = 0) -> dict:
     """Filter to stable candidates, cluster by structural features, return the
     candidate closest to the centroid of the largest cluster.
 
-    Falls back to rank_candidates when fewer than k stable candidates exist.
+    Falls back to rank_candidates when there aren't strictly more stable
+    candidates than clusters — at equality each point becomes its own
+    singleton and KMeans contributes no signal.
     """
     stable = [c for c in candidates if c["stable"]]
-    if len(stable) < max(k, 2):
+    if len(stable) <= max(k, 2):
         ranked = rank_candidates(candidates)
         return ranked[0]
 
