@@ -1,34 +1,79 @@
-"""Connectivity-based stability checker for LEGO brick structures.
+"""Force-equilibrium stability checker for LEGO brick structures.
 
-A brick is considered stable if it can reach the ground (z=0) through a chain
-of vertically adjacent bricks that have overlapping X-Y footprints.
+Every brick is one unit tall, so all contacts lie on the horizontal plane
+between z and z+1. Stability reduces to a linear program: for each brick
+(except those resting on the ground), net vertical force and net moment
+about its center of mass must be zero under gravity.
+
+Per-stud contact variables carry the normal force from the lower brick to
+the upper brick, bounded below by ``-STUD_STRENGTH`` (tension pull-off
+limit of one stud) and unbounded above (compression). Ground reaction is
+modelled as one compressive-only contact per stud cell in each ground-level
+brick's footprint.
+
+Public API is unchanged — :func:`is_stable` and :func:`find_first_unstable`
+preserve the signatures used by the inference pipeline.
 """
 
 from collections import deque
 
+import numpy as np
+from scipy.optimize import linprog
+
 from backend.brick.parser import Brick
+
+# Per-stud tension limit (arbitrary force units).
+STUD_STRENGTH = 1.0
+# Weight per unit footprint area.
+BRICK_DENSITY = 1.0
+# LP tolerance slack for equality constraints — linprog uses HiGHS which is
+# numerically tight, but we leave room for floating-point rounding.
+_LP_METHOD = "highs"
 
 
 def _overlaps_xy(a: Brick, b: Brick) -> bool:
-    """Check if two bricks overlap in the X-Y plane."""
     return (a.x < b.x + b.h and a.x + a.h > b.x and
             a.y < b.y + b.w and a.y + a.w > b.y)
 
 
-def is_stable(bricks: list[Brick]) -> bool:
-    """Return True if all bricks are connected to the ground via adjacency graph.
+def _stud_positions(a: Brick, b: Brick) -> list[tuple[float, float]]:
+    """Integer stud centers (x+0.5, y+0.5) where a and b overlap in XY."""
+    x_lo = max(a.x, b.x)
+    x_hi = min(a.x + a.h, b.x + b.h)
+    y_lo = max(a.y, b.y)
+    y_hi = min(a.y + a.w, b.y + b.w)
+    if x_hi <= x_lo or y_hi <= y_lo:
+        return []
+    return [
+        (sx + 0.5, sy + 0.5)
+        for sx in range(x_lo, x_hi)
+        for sy in range(y_lo, y_hi)
+    ]
 
-    Two bricks are adjacent when their z-values differ by exactly 1 and their
-    X-Y footprints overlap. A brick at z=0 is considered grounded. Every brick
-    must be reachable from a grounded brick to make the structure stable.
-    """
-    if not bricks:
+
+def _ground_studs(b: Brick) -> list[tuple[float, float]]:
+    """Ground reaction stud centers under b's full footprint."""
+    return [
+        (sx + 0.5, sy + 0.5)
+        for sx in range(b.x, b.x + b.h)
+        for sy in range(b.y, b.y + b.w)
+    ]
+
+
+def _brick_com(b: Brick) -> tuple[float, float]:
+    return (b.x + b.h / 2.0, b.y + b.w / 2.0)
+
+
+def _brick_weight(b: Brick) -> float:
+    return BRICK_DENSITY * b.h * b.w
+
+
+def _is_connected(bricks: list[Brick]) -> bool:
+    """Every non-ground brick must be reachable from z=0 through overlapping layers."""
+    n = len(bricks)
+    if n == 0:
         return True
 
-    n = len(bricks)
-
-    # Build adjacency list: edges between bricks that are vertically adjacent
-    # (|z difference| == 1) and overlap in XY.
     adj: list[list[int]] = [[] for _ in range(n)]
     for i in range(n):
         for j in range(i + 1, n):
@@ -36,33 +81,137 @@ def is_stable(bricks: list[Brick]) -> bool:
                 adj[i].append(j)
                 adj[j].append(i)
 
-    # BFS from all ground-level (z=0) bricks.
     visited = [False] * n
     queue: deque[int] = deque()
-
-    for i, brick in enumerate(bricks):
-        if brick.z == 0:
+    for i, b in enumerate(bricks):
+        if b.z == 0:
             visited[i] = True
             queue.append(i)
 
     while queue:
-        current = queue.popleft()
-        for neighbor in adj[current]:
-            if not visited[neighbor]:
-                visited[neighbor] = True
-                queue.append(neighbor)
+        cur = queue.popleft()
+        for nb in adj[cur]:
+            if not visited[nb]:
+                visited[nb] = True
+                queue.append(nb)
 
     return all(visited)
 
 
-def find_first_unstable(bricks: list[Brick]) -> int:
-    """Return the index of the first brick that makes the structure unstable.
+def _solve_equilibrium(bricks: list[Brick]) -> bool:
+    """Return True when the LP for static equilibrium is feasible."""
+    n = len(bricks)
+    if n == 0:
+        return True
 
-    Checks prefixes of increasing length: [bricks[0]], [bricks[0], bricks[1]],
-    etc. Returns the index of the first brick whose addition causes instability,
-    or -1 if the full structure is stable.
+    # Cheap prefilter — any disconnected brick is unstable regardless of the LP.
+    if not _is_connected(bricks):
+        return False
+
+    # Brick-brick contacts: one variable per stud position in each XY overlap
+    # between a brick at z and a brick at z+1. Tension bound = -STUD_STRENGTH,
+    # compression unbounded above.
+    bb_contacts: list[tuple[int, int, float, float]] = []  # (lower, upper, cx, cy)
+    for i in range(n):
+        for j in range(n):
+            if i == j or bricks[j].z != bricks[i].z + 1:
+                continue
+            for cx, cy in _stud_positions(bricks[i], bricks[j]):
+                bb_contacts.append((i, j, cx, cy))
+
+    # Ground contacts: one compressive-only variable per stud under each ground-level brick.
+    g_contacts: list[tuple[int, float, float]] = []  # (brick_idx, cx, cy)
+    for bi, b in enumerate(bricks):
+        if b.z == 0:
+            for cx, cy in _ground_studs(b):
+                g_contacts.append((bi, cx, cy))
+
+    num_bb = len(bb_contacts)
+    num_g = len(g_contacts)
+    num_vars = num_bb + num_g
+
+    if num_vars == 0:
+        return False
+
+    # Index bricks -> contacts that touch them, to avoid O(n*num_contacts) scans.
+    bb_by_upper: list[list[int]] = [[] for _ in range(n)]
+    bb_by_lower: list[list[int]] = [[] for _ in range(n)]
+    for ci, (L, U, _, _) in enumerate(bb_contacts):
+        bb_by_upper[U].append(ci)
+        bb_by_lower[L].append(ci)
+    g_by_brick: list[list[int]] = [[] for _ in range(n)]
+    for gi, (gb, _, _) in enumerate(g_contacts):
+        g_by_brick[gb].append(gi)
+
+    # Equilibrium: for every brick, three equations — vertical force, moment-x,
+    # moment-y — all evaluated at the brick's own center of mass. Three rows
+    # per brick gives ``3n`` equality constraints.
+    A_eq = np.zeros((3 * n, num_vars), dtype=np.float64)
+    b_eq = np.zeros(3 * n, dtype=np.float64)
+
+    for bi, b in enumerate(bricks):
+        com_x, com_y = _brick_com(b)
+        weight = _brick_weight(b)
+        fz_row = 3 * bi
+        mx_row = 3 * bi + 1
+        my_row = 3 * bi + 2
+        b_eq[fz_row] = weight
+
+        # Contacts below b (b is the upper): +f on b.
+        for ci in bb_by_upper[bi]:
+            _, _, cx, cy = bb_contacts[ci]
+            A_eq[fz_row, ci] = 1.0
+            A_eq[mx_row, ci] = cy - com_y
+            A_eq[my_row, ci] = -(cx - com_x)
+        # Contacts above b (b is the lower): -f on b.
+        for ci in bb_by_lower[bi]:
+            _, _, cx, cy = bb_contacts[ci]
+            A_eq[fz_row, ci] = -1.0
+            A_eq[mx_row, ci] = -(cy - com_y)
+            A_eq[my_row, ci] = (cx - com_x)
+        # Ground contacts (pushes up on b, compressive only).
+        for gi in g_by_brick[bi]:
+            _, cx, cy = g_contacts[gi]
+            col = num_bb + gi
+            A_eq[fz_row, col] = 1.0
+            A_eq[mx_row, col] = cy - com_y
+            A_eq[my_row, col] = -(cx - com_x)
+
+    # Bounds: stud grip tension for brick-brick, compression-only for ground.
+    bounds = [(-STUD_STRENGTH, None)] * num_bb + [(0.0, None)] * num_g
+
+    # Pure feasibility — minimize 0.
+    c = np.zeros(num_vars)
+
+    result = linprog(c, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method=_LP_METHOD)
+    return bool(result.success)
+
+
+def is_stable(bricks: list[Brick]) -> bool:
+    """Return True when the structure is in static equilibrium under gravity."""
+    return _solve_equilibrium(bricks)
+
+
+def find_first_unstable(bricks: list[Brick]) -> int:
+    """Return the smallest index ``i`` such that ``bricks[:i+1]`` is unstable, or -1.
+
+    Binary search: assumes instability is monotonic in prefix length, which
+    holds for bottom-up generation because bricks above cannot supply upward
+    support to bricks below — additional weight on a lower brick can only
+    tighten its equilibrium, never loosen it.
     """
-    for i in range(1, len(bricks) + 1):
-        if not is_stable(bricks[:i]):
-            return i - 1
-    return -1
+    n = len(bricks)
+    if n == 0 or is_stable(bricks):
+        return -1
+    if not is_stable(bricks[:1]):
+        return 0
+
+    # Invariant: bricks[:lo] stable, bricks[:hi] unstable.
+    lo, hi = 1, n
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if is_stable(bricks[:mid]):
+            lo = mid
+        else:
+            hi = mid
+    return hi - 1

@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# The regex from brick_pipeline.py line 18 — duplicated here so we can test
+# The regex from brick_pipeline.py — duplicated here so we can test
 # even when torch is not installed.
 _BRICK_RE = re.compile(r"(\d+)x(\d+) \((\d+),(\d+),(\d+)\) #([0-9A-Fa-f]{6})")
 
@@ -25,11 +25,10 @@ try:
 
     from backend.inference.brick_pipeline import (
         BASE_TEMPERATURE,
+        BRICK_PATTERN,
         MAX_BRICKS,
         MAX_REJECTIONS,
         MAX_ROLLBACKS,
-        MAX_TEMPERATURE,
-        TEMP_INCREMENT,
         BrickPipeline,
     )
 
@@ -85,11 +84,50 @@ class TestConstants:
     def test_base_temperature(self):
         assert BASE_TEMPERATURE == pytest.approx(0.6)
 
-    def test_temp_increment(self):
-        assert TEMP_INCREMENT == pytest.approx(0.01)
 
-    def test_max_temperature(self):
-        assert MAX_TEMPERATURE == pytest.approx(2.0)
+# ── TestGrammarPattern (requires module import) ──────────────────────
+
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch or colors.json unavailable")
+class TestGrammarPattern:
+    """The grammar regex handed to the logits processor must accept exactly the
+    set of brick lines that `_BRICK_RE` + allowed dims also accept. Grammar
+    widening or narrowing is a silent correctness hazard, so pin both sides."""
+
+    def test_accepts_all_allowed_dim_combinations(self):
+        pat = re.compile(BRICK_PATTERN)
+        for dims in ["1x1", "1x2", "2x1", "2x2", "1x4", "4x1", "2x4",
+                     "4x2", "1x6", "6x1", "2x6", "6x2", "1x8", "8x1"]:
+            line = f"{dims} (0,0,0) #C91A09\n"
+            assert pat.fullmatch(line) is not None, f"grammar rejected allowed dim {dims}"
+
+    def test_rejects_disallowed_dims(self):
+        pat = re.compile(BRICK_PATTERN)
+        # 3x3 and 1x3 are not in BRICK_SHAPES
+        assert pat.fullmatch("3x3 (0,0,0) #C91A09\n") is None
+        assert pat.fullmatch("1x3 (0,0,0) #C91A09\n") is None
+
+    def test_rejects_malformed_lines(self):
+        pat = re.compile(BRICK_PATTERN)
+        assert pat.fullmatch("2x4 (0, 0, 0) #C91A09\n") is None  # internal spaces
+        assert pat.fullmatch("2x4 (0,0,0) C91A09\n") is None     # missing hash
+        assert pat.fullmatch("2x4 (0,0,0) #C91A0\n") is None     # short hex
+        assert pat.fullmatch("") is None
+
+    def test_grammar_matches_are_parseable_by_backend_regex(self):
+        """Anything the grammar accepts must also match the parser regex,
+        so that `parse_brick` cannot raise after a grammar-constrained decode."""
+        pat = re.compile(BRICK_PATTERN)
+        samples = [
+            "2x4 (5,3,0) #C91A09\n",
+            "1x1 (0,0,0) #000000\n",
+            "8x1 (19,19,19) #FFFFFF\n",
+            "2x6 (10,0,5) #abcdef\n",
+        ]
+        for line in samples:
+            assert pat.fullmatch(line) is not None
+            # _BRICK_RE has no trailing newline, so strip before matching
+            assert _BRICK_RE.fullmatch(line.rstrip("\n")) is not None
 
 
 # ── TestGenerateLoop (requires torch) ────────────────────────────────

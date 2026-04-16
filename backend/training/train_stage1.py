@@ -69,7 +69,7 @@ from backend.config import (
     STAGE1_MAX_SEQ_LENGTH,
     STAGE1_NUM_EPOCHS,
     STAGE1_WARMUP_STEPS,
-    UNIFIED_MODEL_NAME,
+    STAGE1_MODEL_NAME,
     USE_BF16,
     WEIGHT_DECAY,
 )
@@ -194,6 +194,9 @@ def load_model_and_processor(model_name: str, local_rank: int):
         torch.distributed.barrier()
 
     # ── LoRA adapter ───────────────────────────────────────────────────
+    # PiSSA is intentionally *not* set here: it needs SVD on a full-precision
+    # base, which is incompatible with the 4-bit NF4 quantized load above.
+    # DoRA + rsLoRA are compatible with the quantized base.
     lora_config = LoraConfig(
         r=STAGE1_LORA_R,
         lora_alpha=STAGE1_LORA_ALPHA,
@@ -201,6 +204,8 @@ def load_model_and_processor(model_name: str, local_rank: int):
         lora_dropout=0.05,
         bias="none",
         task_type=TaskType.CAUSAL_LM,
+        use_dora=True,
+        use_rslora=True,
     )
     model = get_peft_model(model, lora_config)
 
@@ -239,7 +244,7 @@ def main():
     if is_main:
         print(f"{'=' * 60}")
         print(f"  Stage 1 Training: Image -> LEGO Description")
-        print(f"  Model: {args.model_path or UNIFIED_MODEL_NAME}")
+        print(f"  Model: {args.model_path or STAGE1_MODEL_NAME}")
         print(f"  GPUs: {world_size}")
         print(f"  Per-device batch: {args.batch_size}")
         print(f"  Grad accumulation: {STAGE1_GRADIENT_ACCUMULATION}")
@@ -258,7 +263,7 @@ def main():
         })
 
     # ── Model ──────────────────────────────────────────────────────────
-    model_name = args.model_path or UNIFIED_MODEL_NAME
+    model_name = args.model_path or STAGE1_MODEL_NAME
     if is_main:
         print(f"Loading {model_name} with 4-bit quantization + Stage 1 LoRA...")
     model, processor = load_model_and_processor(

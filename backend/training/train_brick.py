@@ -191,6 +191,9 @@ def main() -> None:
         lora_dropout=BRICK_LORA_DROPOUT,
         target_modules=["q_proj", "v_proj"],
         task_type="CAUSAL_LM",
+        use_dora=True,
+        use_rslora=True,
+        init_lora_weights="pissa",
     )
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()

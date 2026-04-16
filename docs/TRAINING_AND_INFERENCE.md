@@ -138,8 +138,13 @@ tokens before the last `"<|im_start|>assistant\n"` marker with `-100` so
 loss is only computed on the description, not the prompt.
 
 **LoRA config** — `r=32`, `alpha=64`, `target_modules="all-linear"`,
-`dropout=0.05`. Vision encoder parameters (names containing `visual` /
-`vision`) are frozen.
+`dropout=0.05`, with `use_dora=True` and `use_rslora=True`. Vision encoder
+parameters (names containing `visual` / `vision`) are frozen.
+
+PiSSA is intentionally **not** enabled on Stage 1: PiSSA initializes the
+adapter by SVD on the full-precision base weights, which is incompatible
+with the 4-bit NF4 quantized load used here. DoRA and rsLoRA work on top
+of the quantized base without the SVD step.
 
 **Trainer settings** (HuggingFace `Trainer` + `TrainingArguments`):
 
@@ -206,7 +211,10 @@ that applies the weights to a single vectorized cross-entropy call.
 
 **LoRA config** — `r=32`, `alpha=64`, `dropout=0.05`,
 `target_modules=["q_proj", "v_proj"]` (narrower than Stage 1 because the
-task is structurally simpler).
+task is structurally simpler), with `use_dora=True`, `use_rslora=True`,
+and `init_lora_weights="pissa"`. PiSSA is safe here because the base is
+loaded in bf16 (no 4-bit quantization on the Stage 2 Brick trainer), so
+the SVD-based adapter initialization can run against the true weights.
 
 Checkpoint written to `BRICK_CHECKPOINT_DIR`.
 
@@ -316,8 +324,16 @@ Generation constants (top of file):
 - `MAX_BRICKS = 500`
 - `MAX_REJECTIONS = 500` per brick
 - `MAX_ROLLBACKS = 100`
-- Temperature curve: `BASE_TEMPERATURE=0.6` → `+TEMP_INCREMENT=0.01` per
-  rejection, capped at `MAX_TEMPERATURE=2.0`.
+- Temperature: fixed at `BASE_TEMPERATURE=0.6`. The old rejection-driven
+  temperature ramp is removed: grammar-constrained decoding makes parse
+  failures impossible, so the only remaining rejection cause is a voxel
+  collision, which doesn't benefit from higher temperature.
+
+The decoder runs under an `outlines.processors.RegexLogitsProcessor` built
+from `BRICK_PATTERN` (the 14 allowed dim strings × coord tuple × hex
+color), attached at `BrickPipeline.__init__` and passed into every
+`model.generate(...)` call. This forces every token sequence to be a
+syntactically valid brick line before it reaches the voxel check.
 
 Prompt format (lines 27-32):
 
@@ -333,18 +349,25 @@ User:   Create a colored LEGO model. Format: <dims> (<x>,<y>,<z>) <#hex>.
 Each line is parsed with the regex
 `(\d+)x(\d+) \((\d+),(\d+),(\d+)\) #([0-9A-Fa-f]{6})`.
 
-The generation loop combines two correctness mechanisms:
+The generation loop combines three correctness mechanisms:
 
-- **Rejection sampling** — each brick is generated one at a time. If the
-  emitted line doesn't parse or collides with the voxel grid
-  (`backend/brick/occupancy.py::VoxelGrid.can_place` — shape / bounds /
-  collision), the temperature is bumped and the brick is re-sampled.
-- **Physics rollback** — after each placement, `is_stable` (BFS from
-  `z=0` through overlapping layers, `backend/brick/stability.py`) is
-  evaluated. On failure, `find_first_unstable` returns the index of the
-  earliest brick that broke stability; the sequence is truncated to that
-  prefix, the voxel grid cleared, and generation resumes. Up to
-  `MAX_ROLLBACKS` full rollbacks are permitted.
+- **Grammar-constrained decoding** — the logits processor rules out any
+  token that would break the brick-line regex, so every decoded line
+  parses and uses only allowed dimensions.
+- **Voxel rejection sampling** — after decoding, the brick is checked
+  against `VoxelGrid.can_place` (`backend/brick/occupancy.py`) for
+  bounds / collision / shape-set membership. On failure the brick is
+  resampled at the same fixed temperature.
+- **Physics rollback** — after each placement, `is_stable`
+  (`backend/brick/stability.py`) runs a force-equilibrium LP: for every
+  non-ground brick, `scipy.optimize.linprog` must find per-stud contact
+  forces satisfying vertical balance and zero moment about the brick's
+  COM, subject to a per-stud tension bound (`STUD_STRENGTH`) and
+  compression-only ground reactions. On failure,
+  `find_first_unstable` binary-searches prefixes for the earliest brick
+  that broke the LP; the sequence is truncated to that prefix, the voxel
+  grid cleared, and generation resumes. Up to `MAX_ROLLBACKS` full
+  rollbacks are permitted.
 
 Return shape: `{bricks: str, brick_count: int, stable: bool, metadata: {rejections, rollbacks, generation_time_ms}}`.
 
