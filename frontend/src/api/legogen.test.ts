@@ -375,4 +375,64 @@ describe('generateBricksStream', () => {
       prompt: 'x', onEvent: () => {}, timeoutMs: 5,
     })).rejects.toThrow(/abort|timeout/i);
   });
+
+  it('falls back to HTTP <status> when non-ok body is valid JSON without detail', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ other: 'thing' }), {
+      status: 502, headers: { 'Content-Type': 'application/json' },
+    }));
+    // err.detail is undefined here → the ?? `HTTP ${res.status}` fallback fires.
+    await expect(generateBricksStream({
+      prompt: 'x', onEvent: () => {},
+    })).rejects.toThrow('HTTP 502');
+  });
+
+  it('falls back to generic message when error event body lacks detail', async () => {
+    fetchMock.mockResolvedValueOnce(sseResponse([
+      'event: error\ndata: {"code":"x"}\n\n',
+    ]));
+    // data.detail is undefined → the ?? 'Generation failed' fallback fires.
+    await expect(generateBricksStream({
+      prompt: 'x', onEvent: () => {},
+    })).rejects.toThrow('Generation failed');
+  });
+});
+
+describe('coverage-closing corner cases', () => {
+  const fetchMock = vi.fn();
+  beforeEach(() => {
+    fetchMock.mockReset();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('generateBricks falls back to HTTP <status> when non-ok JSON lacks detail', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ other: 'thing' }), {
+      status: 503, headers: { 'Content-Type': 'application/json' },
+    }));
+    await expect(generateBricks(undefined, 'hi')).rejects.toThrow('HTTP 503');
+  });
+
+  it('createGalleryBuild falls back to HTTP <status> when non-ok JSON lacks detail', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ other: 'thing' }), {
+      status: 418, headers: { 'Content-Type': 'application/json' },
+    }));
+    await expect(createGalleryBuild({
+      title: 't', caption: '', bricks: 'x', brick_count: 0, stable: true,
+    })).rejects.toThrow('HTTP 418');
+  });
+
+  it('getGalleryBuild returns the build JSON on 200', async () => {
+    const build = {
+      id: 'abc', title: 't', caption: '', bricks: '', brick_count: 0,
+      stable: true, thumbnail_b64: '', stars: 0, star_count: 0,
+      created_at: '2026-04-17',
+    };
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(build), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }));
+    const out = await getGalleryBuild('abc');
+    expect(out).toEqual(build);
+  });
 });

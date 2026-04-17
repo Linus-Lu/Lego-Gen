@@ -172,6 +172,9 @@ export async function generateBricksStream(
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const chunks = buffer.split('\n\n');
+      // String.split always returns an array of length ≥ 1, so pop() never
+      // returns undefined here; the `?? ''` is a belt-and-suspenders fallback.
+      /* v8 ignore next -- unreachable: split() minimum length is 1 */
       buffer = chunks.pop() ?? '';
 
       for (const chunk of chunks) {
