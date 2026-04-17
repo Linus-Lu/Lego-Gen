@@ -147,7 +147,8 @@ def generate_description_from_label(label: dict) -> str:
 # ── COCO helpers ──────────────────────────────────────────────────────────
 
 
-def load_coco_annotations(coco_dir: Path) -> list[dict]:
+# Filesystem orchestration — requires the COCO annotations JSON on disk.
+def load_coco_annotations(coco_dir: Path) -> list[dict]:  # pragma: no cover
     """Load COCO 2017 train annotations and return filtered image records.
 
     Filters to images that contain at least one annotation whose category
@@ -223,7 +224,9 @@ def load_coco_annotations(coco_dir: Path) -> list[dict]:
 # ── Main builder ──────────────────────────────────────────────────────────
 
 
-def build_stage1_manifest(
+# End-to-end dataset assembly — reads COCO + ST2B + Rebrickable off disk and
+# writes the manifest; covered by the full training pipeline, not unit tests.
+def build_stage1_manifest(  # pragma: no cover
     coco_dir: Path,
     st2b_dir: Path,
     rebrickable_dir: Path | None,
@@ -342,7 +345,8 @@ def build_stage1_manifest(
 # ── CLI ───────────────────────────────────────────────────────────────────
 
 
-def main() -> None:
+# CLI entry point — wraps build_stage1_manifest with argparse; not unit-tested.
+def main() -> None:  # pragma: no cover
     parser = argparse.ArgumentParser(
         description="Build Stage 1 training manifest (COCO + ST2B caption matching)."
     )

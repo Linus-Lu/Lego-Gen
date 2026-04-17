@@ -97,7 +97,9 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 100
+# Note: the 100% threshold is enforced in CI via `pytest --cov-fail-under=100`
+# (see .github/workflows/tests.yml). Keeping it out of `[tool.coverage.report]`
+# lets local intermediate runs still exit 0 while tests backfill.
 show_missing = true
 skip_covered = false
 exclude_also = [
@@ -318,6 +320,8 @@ Also mark `_build_logits_processor`'s `from outlines.processors import ...` call
 - [ ] **Step 4: Add pragma to `backend/data_pipeline/build_stage1_dataset.py`**
 
 Add `# pragma: no cover` to the signatures of `load_coco_annotations` (line 150), `build_stage1_manifest` (line 226), and `main` (line 345). These are network/IO orchestration.
+
+> **Note:** This step was completed as part of the Task 1 fix-up (commit that drops `fail_under` from pyproject and pragma'd the three functions + the untested `_make_seed` / `main` in `prepare_brick_dataset.py`). Verify the pragmas are still in place; otherwise skip to Step 5.
 
 - [ ] **Step 5: Leave `backend/config.py` unannotated**
 
@@ -1451,9 +1455,9 @@ git commit -m "test(app): cover /health, CORS env parsing, and dev-mode lifespan
 
 - [ ] **Step 1: Run everything**
 
-Run: `LEGOGEN_DEV=1 .venv/bin/python -m pytest -q`
+Run: `LEGOGEN_DEV=1 .venv/bin/python -m pytest --cov-fail-under=100 -q`
 
-Expected: all tests pass. The coverage table at the end should show `TOTAL ... 100%`. The `addopts` in `pyproject.toml` auto-enables the coverage run; `fail_under = 100` will fail the command if coverage is below 100.
+Expected: all tests pass. The coverage table at the end should show `TOTAL ... 100%`. The `addopts` in `pyproject.toml` auto-enables the coverage run; the explicit `--cov-fail-under=100` fails the command if coverage is below 100. (The threshold is not baked into `[tool.coverage.report]` so intermediate runs during Tasks 2–14 still exit 0 — CI enforces the gate via the same flag in `.github/workflows/tests.yml`.)
 
 - [ ] **Step 2: If any file is below 100%, add targeted tests or pragma**
 
@@ -1978,7 +1982,7 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
 
       - name: Run pytest with coverage
-        run: python -m pytest -q
+        run: python -m pytest --cov-fail-under=100 -q
 
       - name: Upload coverage report
         if: always()
@@ -2055,7 +2059,7 @@ Replace with:
 ```markdown
 ## Coverage
 
-`pyproject.toml` wires pytest-cov with `fail_under = 100`; `LEGOGEN_DEV=1 .venv/bin/python -m pytest` measures coverage on every run and fails when any line in `backend/` (minus the `omit`d loader code) is uncovered. `# pragma: no cover` is grep-able — add one only for real model-loading or CLI orchestration code, with a one-line reason comment above it.
+`pyproject.toml` wires pytest-cov so `LEGOGEN_DEV=1 .venv/bin/python -m pytest` measures coverage on every run. The 100% gate lives in CI (`.github/workflows/tests.yml` passes `--cov-fail-under=100` to pytest); to reproduce the gate locally, run `LEGOGEN_DEV=1 .venv/bin/python -m pytest --cov-fail-under=100 -q`. `# pragma: no cover` is grep-able — add one only for real model-loading or CLI orchestration code, with a one-line reason comment above it.
 
 Frontend coverage is scoped to `frontend/src/api/**` only. Run it with `cd frontend && npm run test:coverage` — v8 reporter, 100% threshold.
 

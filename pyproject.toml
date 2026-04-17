@@ -16,7 +16,9 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 100
+# Note: the 100% threshold is enforced in CI via `pytest --cov-fail-under=100`
+# (see .github/workflows/tests.yml). Keeping it out of `[tool.coverage.report]`
+# lets local intermediate runs still exit 0 while tests backfill.
 show_missing = true
 skip_covered = false
 exclude_also = [
