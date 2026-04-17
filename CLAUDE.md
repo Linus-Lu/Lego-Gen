@@ -29,7 +29,15 @@ GPU-only tests are auto-skipped on machines without CUDA (`tests/conftest.py` ad
 
 There is no lint/format config in-tree (no ruff, eslint, prettier, mypy). Don't invent one.
 
-**Known pre-existing test failure**: `tests/test_brick_decoder.py::test_allowed_colors_populated` fails because `colors.json` isn't checked in. It's in the explicit skip list in `.claude/settings.local.json` — ignore it when running the suite.
+## Coverage
+
+`pyproject.toml` wires pytest-cov so `LEGOGEN_DEV=1 .venv/bin/python -m pytest` measures coverage on every run (via `addopts = "--cov --cov-report=term-missing"`). The 100% gate is enforced by CI (`--cov-fail-under=100` in `.github/workflows/tests.yml`), not locally, so individual test runs don't fail on intermediate coverage states.
+
+`# pragma: no cover` is grep-able — add one only for real model-loading or CLI orchestration code, with a one-line reason comment inline. `backend/training/*`, `backend/data_pipeline/dataset_stage1.py`, and `backend/inference/stage1_pipeline.py` are file-level omitted in `[tool.coverage.run] omit`.
+
+Frontend coverage is scoped to `frontend/src/api/**` only. Run it with `cd frontend && npm run test:coverage` — v8 reporter, 100% threshold declared in `frontend/vitest.config.ts`.
+
+`.github/workflows/tests.yml` runs both gates on every PR and push to `main`.
 
 ## Training entry points
 
