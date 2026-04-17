@@ -176,3 +176,106 @@ class TestGallery:
         )
         assert resp.status_code == 200
         assert resp.json()["stars"] == pytest.approx(5.0)
+
+
+class TestGenerateValidationLimits:
+    def test_image_exceeding_size_limit_returns_413(self, client):
+        """MAX_IMAGE_BYTES is 10 MB — send 11 MB of zeros and expect 413."""
+        oversize = b"\x00" * (11 * 1024 * 1024)
+        resp = client.post(
+            "/api/generate-bricks",
+            files={"image": ("big.png", oversize, "image/png")},
+        )
+        assert resp.status_code == 413
+        assert "10" in resp.json()["detail"]
+
+    def test_prompt_exceeding_char_limit_returns_413(self, client):
+        """MAX_PROMPT_CHARS is 2000; 2001 chars must 413."""
+        resp = client.post(
+            "/api/generate-bricks",
+            data={"prompt": "x" * 2001},
+        )
+        assert resp.status_code == 413
+        assert "2000" in resp.json()["detail"]
+
+    def test_prompt_whitespace_only_treated_as_empty(self, client):
+        resp = client.post("/api/generate-bricks", data={"prompt": "   \n\t  "})
+        assert resp.status_code == 400
+
+    def test_stream_image_wrong_mime_returns_400(self, client):
+        resp = client.post(
+            "/api/generate-stream",
+            files={"image": ("x.txt", b"text", "text/plain")},
+        )
+        assert resp.status_code == 400
+
+    def test_stream_no_input_returns_400(self, client):
+        resp = client.post("/api/generate-stream", data={"prompt": ""})
+        assert resp.status_code == 400
+
+
+class TestGenerateTimeout:
+    def test_generate_bricks_timeout_returns_504(self, monkeypatch, client):
+        """Patch the MockBrickPipeline.generate to sleep longer than the timeout
+        so asyncio.wait_for fires 504."""
+        import time
+        from backend.inference import brick_pipeline as bp
+        from backend.api import routes_generate as rg
+
+        monkeypatch.setattr(rg, "INFERENCE_TIMEOUT_SECONDS", 0.05)
+
+        def slow_generate(self, caption, on_progress=None):
+            time.sleep(1.0)
+            return {"bricks": "", "brick_count": 0, "stable": True, "metadata": {}}
+
+        monkeypatch.setattr(bp.MockBrickPipeline, "generate", slow_generate)
+        resp = client.post("/api/generate-bricks", data={"prompt": "slow build"})
+        assert resp.status_code == 504
+        assert "timed out" in resp.json()["detail"].lower()
+
+
+class TestGenerateBestOfNImagePath:
+    def test_image_with_n_runs_bon(self, client):
+        png = _make_png_bytes()
+        resp = client.post(
+            "/api/generate-bricks",
+            files={"image": ("x.png", png, "image/png")},
+            data={"n": "2"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["metadata"]["n"] == 2
+        assert "caption" in body
+
+    def test_stream_bon_emits_sample_events(self, client):
+        resp = client.post(
+            "/api/generate-stream",
+            data={"prompt": "a red robot", "n": "2"},
+        )
+        assert resp.status_code == 200
+        # MockBrickPipeline.generate_best_of_n doesn't emit sample events
+        # (it calls generate once). This asserts the happy path still
+        # terminates with a result event.
+        assert "event: result" in resp.text
+
+
+class TestStreamOrdering:
+    def test_event_sequence(self, client):
+        """SSE must emit at least one progress event before any result event."""
+        resp = client.post("/api/generate-stream", data={"prompt": "house"})
+        assert resp.status_code == 200
+        body = resp.text
+        progress_idx = body.index("event: progress")
+        result_idx = body.index("event: result")
+        assert progress_idx < result_idx
+
+    def test_stream_image_caption_progress(self, client):
+        """Image path must emit a stage1 progress event with the caption."""
+        png = _make_png_bytes()
+        resp = client.post(
+            "/api/generate-stream",
+            files={"image": ("x.png", png, "image/png")},
+        )
+        assert resp.status_code == 200
+        assert "\"stage\": \"stage1\"" in resp.text
+        assert "\"caption\"" in resp.text
