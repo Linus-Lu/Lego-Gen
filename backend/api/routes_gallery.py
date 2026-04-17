@@ -15,13 +15,21 @@ from backend.storage.gallery_db import (
 router = APIRouter(prefix="/api", tags=["gallery"])
 
 
+# Gallery is unauthenticated by design; cap every free-form string so one
+# client can't stuff the SQLite DB with megabyte-sized blobs.
+_MAX_TITLE_CHARS = 200
+_MAX_CAPTION_CHARS = 2000
+_MAX_BRICKS_CHARS = 200_000  # ≈ 500 bricks at 40 chars/line → plenty of slack
+_MAX_THUMBNAIL_CHARS = 400_000  # base64 of a ~300 KB PNG
+
+
 class CreateBuildRequest(BaseModel):
-    title: str
-    caption: str = ""
-    bricks: str
-    brick_count: int = 0
+    title: str = Field(min_length=1, max_length=_MAX_TITLE_CHARS)
+    caption: str = Field(default="", max_length=_MAX_CAPTION_CHARS)
+    bricks: str = Field(max_length=_MAX_BRICKS_CHARS)
+    brick_count: int = Field(default=0, ge=0)
     stable: bool = True
-    thumbnail_b64: str = ""
+    thumbnail_b64: str = Field(default="", max_length=_MAX_THUMBNAIL_CHARS)
 
 
 class StarRequest(BaseModel):

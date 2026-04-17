@@ -43,6 +43,7 @@ export default function BrickMesh({
           transparent={translucent}
           opacity={opacity}
           wireframe={wireframe}
+          depthWrite={!translucent}
         />
       </mesh>
       {studs.map((sp, i) => (
@@ -55,6 +56,7 @@ export default function BrickMesh({
             transparent={translucent}
             opacity={opacity}
             wireframe={wireframe}
+            depthWrite={!translucent}
           />
         </mesh>
       ))}

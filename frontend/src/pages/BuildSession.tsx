@@ -1,5 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Header from '../components/Header';
 import Footer from '../components/Footer';
 import UploadPanel from '../components/UploadPanel';
@@ -17,8 +16,6 @@ import type { BrickResponse, StreamEvent } from '../api/legogen';
 type Stage = 'idle' | 'stage1' | 'stage2' | 'done' | 'error';
 
 export default function BuildSession() {
-  const navigate = useNavigate();
-
   const [file, setFile] = useState<File | null>(null);
   const [prompt, setPrompt] = useState('');
   const [stage, setStage] = useState<Stage>('idle');
@@ -32,6 +29,11 @@ export default function BuildSession() {
   const [title, setTitle] = useState('');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => abortRef.current?.abort();
+  }, []);
 
   const bricks = useMemo(() => (result ? parseBrickString(result.bricks) : []), [result]);
   const { steps: layers, zLevels } = useMemo(() => bricksToLayers(bricks), [bricks]);
@@ -54,10 +56,15 @@ export default function BuildSession() {
     reset();
     setStage(file ? 'stage1' : 'stage2');
 
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
       const res = await generateBricksStream({
         image: file ?? undefined,
         prompt: prompt.trim() || undefined,
+        signal: controller.signal,
         onEvent: (evt: StreamEvent) => {
           if (evt.type === 'progress') {
             if (evt.stage === 'stage1') setStage('stage1');
@@ -78,6 +85,10 @@ export default function BuildSession() {
       const firstWord = (res.caption ?? prompt ?? 'build').split(/\s+/).slice(0, 3).join(' ');
       setTitle(firstWord ? firstWord.charAt(0).toUpperCase() + firstWord.slice(1) : 'Untitled');
     } catch (e: any) {
+      // Only swallow the error if the caller intentionally aborted. A bare
+      // AbortError without controller.signal.aborted means the SSE client's
+      // internal timeout fired — that's a real failure the user should see.
+      if (controller.signal.aborted) return;
       setError(e?.message ?? 'Generation failed');
       setStage('error');
     }
@@ -254,8 +265,9 @@ export default function BuildSession() {
                     </label>
                   </div>
                   <button
-                    onClick={() => navigate(`/build`)}
-                    className="mono text-[10px] tracking-[0.18em] uppercase text-[var(--color-mute)] hover:text-[var(--color-acid)]"
+                    onClick={() => setCurrentStep(layers.length)}
+                    disabled={currentStep >= layers.length}
+                    className="mono text-[10px] tracking-[0.18em] uppercase text-[var(--color-mute)] hover:text-[var(--color-acid)] disabled:opacity-40 disabled:hover:text-[var(--color-mute)]"
                   >
                     jump to full ↗
                   </button>

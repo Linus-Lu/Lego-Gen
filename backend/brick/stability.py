@@ -130,7 +130,7 @@ def _solve_equilibrium(bricks: list[Brick]) -> bool:
     num_g = len(g_contacts)
     num_vars = num_bb + num_g
 
-    if num_vars == 0:
+    if num_vars == 0:  # pragma: no cover — unreachable: n>0 with no contacts implies no z=0 brick, so _is_connected would have returned False above.
         return False
 
     # Index bricks -> contacts that touch them, to avoid O(n*num_contacts) scans.
@@ -195,23 +195,18 @@ def is_stable(bricks: list[Brick]) -> bool:
 def find_first_unstable(bricks: list[Brick]) -> int:
     """Return the smallest index ``i`` such that ``bricks[:i+1]`` is unstable, or -1.
 
-    Binary search: assumes instability is monotonic in prefix length, which
-    holds for bottom-up generation because bricks above cannot supply upward
-    support to bricks below — additional weight on a lower brick can only
-    tighten its equilibrium, never loosen it.
+    Uses a linear scan rather than binary search: instability is *not*
+    monotone in prefix length because stud contacts allow tension
+    (``-STUD_STRENGTH`` lower bound). A brick above can pull a cantilevered
+    brick down and stabilize a prefix that was unstable one brick earlier —
+    see ``test_counterweighted_cantilever_stable``. Binary search on a
+    non-monotone predicate can return a prefix that's either too short or
+    too long.
     """
     n = len(bricks)
     if n == 0 or is_stable(bricks):
         return -1
-    if not is_stable(bricks[:1]):
-        return 0
-
-    # Invariant: bricks[:lo] stable, bricks[:hi] unstable.
-    lo, hi = 1, n
-    while hi - lo > 1:
-        mid = (lo + hi) // 2
-        if is_stable(bricks[:mid]):
-            lo = mid
-        else:
-            hi = mid
-    return hi - 1
+    for i in range(n):
+        if not is_stable(bricks[: i + 1]):
+            return i
+    return -1  # pragma: no cover — unreachable: is_stable(bricks) returned False above, so some prefix must be unstable.

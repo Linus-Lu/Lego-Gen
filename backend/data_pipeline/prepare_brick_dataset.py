@@ -216,14 +216,16 @@ def format_training_example(caption: str, bricks: list[Brick]) -> dict:
 # Main — dataset download + JSONL writing
 # ---------------------------------------------------------------------------
 
-def _make_seed(structure_id: str, caption_index: int) -> int:
+# Helper only used inside main()'s dataset-download loop — excluded with main.
+def _make_seed(structure_id: str, caption_index: int) -> int:  # pragma: no cover
     """Deterministic integer seed from structure_id + caption index."""
     key = f"{structure_id}:{caption_index}".encode()
     digest = hashlib.md5(key).digest()
     return int.from_bytes(digest[:4], "big")
 
 
-def main() -> None:
+# CLI entry point — downloads the HF dataset and writes JSONL; not run in tests.
+def main() -> None:  # pragma: no cover
     """Download StableText2Brick and write JSONL training data.
 
     Output files:

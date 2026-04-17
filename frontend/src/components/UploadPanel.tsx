@@ -1,16 +1,37 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 interface UploadPanelProps {
   onFileSelected: (file: File | null) => void;
   file?: File | null;
 }
 
+const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
+
 export default function UploadPanel({ onFileSelected, file }: UploadPanelProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  // Revoke the blob URL when it's replaced or the component unmounts —
+  // ``URL.createObjectURL`` pins the file in native memory until released.
+  useEffect(() => {
+    if (!preview) return;
+    return () => URL.revokeObjectURL(preview);
+  }, [preview]);
+
+  const clear = useCallback(() => {
+    setPreview(null);
+    setUploadError(null);
+    onFileSelected(null);
+  }, [onFileSelected]);
 
   const take = useCallback((f: File) => {
+    if (f.size > MAX_UPLOAD_BYTES) {
+      setUploadError(`File is ${(f.size / (1024 * 1024)).toFixed(1)} MB — limit is 8 MB`);
+      return;
+    }
+    setUploadError(null);
     setPreview(URL.createObjectURL(f));
     onFileSelected(f);
   }, [onFileSelected]);
@@ -53,8 +74,7 @@ export default function UploadPanel({ onFileSelected, file }: UploadPanelProps) 
                 type="button"
                 onClick={e => {
                   e.stopPropagation();
-                  setPreview(null);
-                  onFileSelected(null);
+                  clear();
                 }}
                 className="mono text-[10px] tracking-[0.2em] uppercase text-[var(--color-danger)] hover:text-white px-2 py-1 border border-[var(--color-danger)]/40 hover:bg-[var(--color-danger)]"
               >
@@ -71,6 +91,11 @@ export default function UploadPanel({ onFileSelected, file }: UploadPanelProps) 
               <p className="mono text-[10px] tracking-[0.14em] text-[var(--color-dim)] uppercase">
                 JPG / PNG / WEBP · ≤ 8MB
               </p>
+              {uploadError && (
+                <p className="mono text-[10px] tracking-[0.14em] uppercase text-[var(--color-danger)] mt-2">
+                  {uploadError}
+                </p>
+              )}
             </div>
           </div>
         )}

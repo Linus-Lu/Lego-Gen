@@ -62,5 +62,69 @@ def _load_color_palette(path: str) -> dict[str, str]:
     return palette
 
 
-COLOR_PALETTE: dict[str, str] = _load_color_palette(_COLORS_JSON)
-ALLOWED_COLORS: list[str] = sorted(COLOR_PALETTE.keys())
+def _lazy_palette() -> dict[str, str]:
+    """Load the palette on first access; cache it for subsequent calls.
+
+    Kept lazy so that importing this module for ``BRICK_SHAPES`` / ``WORLD_DIM``
+    (the inference path) doesn't crash when ``data/cache/colors.json`` is
+    absent. Consumers of the palette (decoder.py) fail loudly at call time.
+    """
+    cached = getattr(_lazy_palette, "_cache", None)
+    if cached is None:
+        cached = _load_color_palette(_COLORS_JSON)
+        _lazy_palette._cache = cached  # type: ignore[attr-defined]
+    return cached
+
+
+class _LazyMapping:
+    """dict-like facade that defers loading until first access."""
+
+    def _load(self) -> dict[str, str]:
+        return _lazy_palette()
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._load()
+
+    def __getitem__(self, key: str) -> str:
+        return self._load()[key]
+
+    def __iter__(self):
+        return iter(self._load())
+
+    def __len__(self) -> int:
+        return len(self._load())
+
+    def get(self, key: str, default=None):
+        return self._load().get(key, default)
+
+    def keys(self):
+        return self._load().keys()
+
+    def values(self):
+        return self._load().values()
+
+    def items(self):
+        return self._load().items()
+
+
+class _LazyColors:
+    """list-like facade that defers palette load until first access."""
+
+    def _load(self) -> list[str]:
+        return sorted(_lazy_palette().keys())
+
+    def __iter__(self):
+        return iter(self._load())
+
+    def __len__(self) -> int:
+        return len(self._load())
+
+    def __getitem__(self, idx):
+        return self._load()[idx]
+
+    def __contains__(self, item: object) -> bool:
+        return item in self._load()
+
+
+COLOR_PALETTE: dict[str, str] = _LazyMapping()  # type: ignore[assignment]
+ALLOWED_COLORS: list[str] = _LazyColors()  # type: ignore[assignment]

@@ -351,7 +351,8 @@ def main():
         print("Starting Stage 1 training...")
     trainer.train()
 
-    # ── Save adapter ───────────────────────────────────────────────────
+    # ── Save adapter (rank 0 only, other ranks wait) ───────────────────
+    is_distributed = torch.distributed.is_initialized()
     if is_main:
         output_path = Path(args.output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -359,11 +360,21 @@ def main():
         model.save_pretrained(str(output_path))
         processor.save_pretrained(str(output_path))
         print("Done.")
+    if is_distributed:
+        # Don't let non-rank-0 processes exit while rank 0 is still writing
+        # checkpoint files — tearing down NCCL mid-save can corrupt the save.
+        torch.distributed.barrier()
 
-    # ── Final evaluation ───────────────────────────────────────────────
+    # ── Final evaluation (all ranks — it's a collective op) ────────────
+    # trainer.evaluate() runs the eval DataLoader across all ranks with
+    # DistributedSampler and all-reduces the loss. Gating it behind
+    # ``is_main`` deadlocks rank 0 on the all-reduce because the other
+    # ranks never enter. Every rank must call evaluate(); only rank 0
+    # prints the metrics.
     if is_main:
         print("Running final evaluation...")
-        metrics = trainer.evaluate()
+    metrics = trainer.evaluate()
+    if is_main:
         print("\nFinal Metrics:")
         for k, v in sorted(metrics.items()):
             print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")

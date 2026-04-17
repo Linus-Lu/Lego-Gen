@@ -4,8 +4,7 @@ Also exposes the top-level factory get_brick_pipeline() used by the API routes,
 and a MockBrickPipeline for dev mode (LEGOGEN_DEV=1).
 """
 
-import random
-import re
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -17,13 +16,26 @@ from backend.brick.stability import is_stable, find_first_unstable
 from backend.config import BRICK_MODEL_NAME, BRICK_CHECKPOINT_DIR, LEGOGEN_DEV
 from backend.inference.best_of_n import rank_candidates, cluster_and_pick
 
-_BRICK_RE = re.compile(r"(\d+)x(\d+) \((\d+),(\d+),(\d+)\) #([0-9A-Fa-f]{6})")
+
+def _coord_pattern(max_exclusive: int) -> str:
+    """Regex alt matching integers 0..max_exclusive-1 with no leading zeros.
+
+    Listed longest-first so NFA engines don't prefix-match "1" when "10" is meant.
+    """
+    vals = sorted(range(max_exclusive), key=lambda v: (-len(str(v)), v))
+    return "(?:" + "|".join(str(v) for v in vals) + ")"
 
 
 def _build_grammar_pattern() -> str:
-    """Regex matching one brick line, restricted to allowed dims."""
-    dims_alt = "|".join(sorted({f"{h}x{w}" for h, w in BRICK_SHAPES}))
-    return rf"({dims_alt}) \(\d{{1,2}},\d{{1,2}},\d{{1,2}}\) #[0-9A-Fa-f]{{6}}\n"
+    """Regex matching one brick line, restricted to allowed dims and in-bounds coords.
+
+    Dims are listed longest-first so FSM compilers don't prefix-match ``1x1``
+    when ``1x10`` would be valid for any future wider grids.
+    """
+    dims = sorted({f"{h}x{w}" for h, w in BRICK_SHAPES}, key=lambda s: (-len(s), s))
+    dims_alt = "|".join(dims)
+    coord = _coord_pattern(WORLD_DIM)
+    return rf"({dims_alt}) \({coord},{coord},{coord}\) #[0-9A-Fa-f]{{6}}\n"
 
 
 BRICK_PATTERN = _build_grammar_pattern()
@@ -45,10 +57,10 @@ def _build_logits_processor(tokenizer, pattern: str):
     """Instantiate an outlines RegexLogitsProcessor, or None if outlines is absent."""
     try:
         from outlines.processors import RegexLogitsProcessor
-        from outlines.models.transformers import TransformerTokenizer
+        from outlines.models.transformers import TransformerTokenizer  # pragma: no cover — only reachable when outlines is installed; CI runs without it.
     except ImportError:
         return None
-    return RegexLogitsProcessor(pattern, TransformerTokenizer(tokenizer))
+    return RegexLogitsProcessor(pattern, TransformerTokenizer(tokenizer))  # pragma: no cover — only reachable when outlines is installed; CI runs without it.
 
 
 class BrickPipeline:
@@ -60,7 +72,7 @@ class BrickPipeline:
       3. Physics rollback — LP-based stability check via backend/brick/stability.py.
     """
 
-    def __init__(self, device: str = "cuda") -> None:
+    def __init__(self, device: str = "cuda") -> None:  # pragma: no cover — loads Qwen3.5-4B + LoRA weights; requires GPU.
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
         from peft import PeftModel
@@ -89,9 +101,16 @@ class BrickPipeline:
         )
         self.model.eval()
 
-        self.logits_processor = _build_logits_processor(self.tokenizer, BRICK_PATTERN)
+    def _fresh_logits_processor(self):  # pragma: no cover — depends on real tokenizer loaded by __init__.
+        """Build a new RegexLogitsProcessor, or None if outlines is absent.
 
-    def generate(self, caption: str, on_progress=None) -> dict:
+        We rebuild per ``generate()`` call because the processor's internal
+        FSM-state dict accumulates one entry per token across calls and is
+        never reset, which would leak memory in a long-running server.
+        """
+        return _build_logits_processor(self.tokenizer, BRICK_PATTERN)
+
+    def generate(self, caption: str, on_progress=None) -> dict:  # pragma: no cover — runs the real torch model; MockBrickPipeline.generate covers the shape.
         """Generate a brick structure for *caption*.
 
         If ``on_progress`` is provided, it is called with events of the form:
@@ -118,10 +137,12 @@ class BrickPipeline:
         grid = VoxelGrid()
         total_rejections = 0
         total_rollbacks = 0
+        # Fresh logits processor per call — see _fresh_logits_processor().
+        logits_processor = self._fresh_logits_processor()
 
         for _ in range(MAX_ROLLBACKS):
             while len(bricks) < MAX_BRICKS:
-                brick, rej = self._generate_one_brick(input_ids, grid)
+                brick, rej = self._generate_one_brick(input_ids, grid, logits_processor)
                 total_rejections += rej
                 if brick is None:
                     break
@@ -141,7 +162,11 @@ class BrickPipeline:
                 break
 
             idx = find_first_unstable(bricks)
-            if idx <= 0:
+            # idx == -1 means fully stable (handled above); guard against it
+            # anyway. idx == 0 means even the first brick is unstable — rare
+            # (an LP failure on a single ground brick) but when it happens,
+            # drop everything and let the outer loop regenerate from scratch.
+            if idx < 0:
                 break
 
             bricks = bricks[:idx]
@@ -169,7 +194,7 @@ class BrickPipeline:
             },
         }
 
-    def generate_best_of_n(self, caption: str, n: int = 16, strategy: str = "cluster", on_progress=None) -> dict:
+    def generate_best_of_n(self, caption: str, n: int = 16, strategy: str = "cluster", on_progress=None) -> dict:  # pragma: no cover — calls real generate(); BoN logic covered via MockBrickPipeline / __new__ stubs.
         """Run generate() n times and return the chosen sample.
 
         strategy="rank"    -> rank_candidates, return top
@@ -179,6 +204,9 @@ class BrickPipeline:
         for i in range(n):
             sample = self.generate(caption, on_progress=None)
             sample["bricks_parsed"] = parse_brick_sequence(sample["bricks"])
+            # Stamp the sample's original index so we don't have to recover it
+            # via value-equality on mutated dicts later.
+            sample["_bon_index"] = i
             candidates.append(sample)
             if on_progress is not None:
                 on_progress({"type": "sample", "index": i + 1, "of": n, "stable": sample["stable"]})
@@ -190,18 +218,23 @@ class BrickPipeline:
             picked = rank_candidates(candidates)[0]
         else:
             picked = cluster_and_pick(candidates, k=min(3, n), seed=0)
-        picked_index = candidates.index(picked)
+        picked_index = picked["_bon_index"]
 
-        # Restore the serialized "bricks" string on the returned dict.
-        picked["bricks"] = "\n".join(serialize_brick(b) for b in picked["bricks"])
-        picked.pop("bricks_parsed", None)
+        # Restore the serialized "bricks" string and clean scratch fields on
+        # every candidate so nothing downstream sees the partially-mutated
+        # state. Only *picked* is returned, but the others may be logged.
+        for c in candidates:
+            c["bricks"] = "\n".join(serialize_brick(b) for b in c["bricks"])
+            c.pop("bricks_parsed", None)
+            c.pop("_bon_index", None)
+
         picked.setdefault("metadata", {})
         picked["metadata"]["n"] = n
         picked["metadata"]["picked_index"] = picked_index
         picked["metadata"]["stable_rate"] = sum(1 for c in candidates if c["stable"]) / n
         return picked
 
-    def generate_from_image(self, image, on_progress=None) -> dict:
+    def generate_from_image(self, image, on_progress=None) -> dict:  # pragma: no cover — chains real Stage1 + Stage2 pipelines; mock counterpart covers the wiring.
         """Two-stage: image → Stage 1 caption → brick sequence."""
         caption = _get_stage1_pipeline().describe(image)
         if on_progress is not None:
@@ -210,7 +243,9 @@ class BrickPipeline:
         result["caption"] = caption
         return result
 
-    def _generate_one_brick(self, input_ids, grid: VoxelGrid) -> tuple[Optional[Brick], int]:
+    def _generate_one_brick(
+        self, input_ids, grid: VoxelGrid, logits_processor=None,
+    ) -> tuple[Optional[Brick], int]:  # pragma: no cover — invokes self.model.generate() on a real transformer.
         import torch
 
         gen_kwargs = dict(
@@ -221,8 +256,8 @@ class BrickPipeline:
             pad_token_id=self.tokenizer.pad_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
         )
-        if self.logits_processor is not None:
-            gen_kwargs["logits_processor"] = [self.logits_processor]
+        if logits_processor is not None:
+            gen_kwargs["logits_processor"] = [logits_processor]
 
         for attempt in range(MAX_REJECTIONS):
             with torch.no_grad():
@@ -313,26 +348,32 @@ class MockBrickPipeline:
 
 _brick_instance = None
 _stage1_instance = None
+_brick_lock = threading.Lock()
+_stage1_lock = threading.Lock()
 
 
 def get_brick_pipeline():
     global _brick_instance
     if _brick_instance is None:
-        if LEGOGEN_DEV:
-            _brick_instance = MockBrickPipeline()
-        else:
-            _brick_instance = BrickPipeline()
+        with _brick_lock:
+            if _brick_instance is None:  # pragma: no branch — inner race-resolution branch; unreachable in single-threaded tests.
+                if LEGOGEN_DEV:
+                    _brick_instance = MockBrickPipeline()
+                else:  # pragma: no cover — BrickPipeline() needs GPU; LEGOGEN_DEV=1 in CI.
+                    _brick_instance = BrickPipeline()
     return _brick_instance
 
 
 def _get_stage1_pipeline():
     global _stage1_instance
     if _stage1_instance is None:
-        if LEGOGEN_DEV:
-            _stage1_instance = _MockStage1()
-        else:
-            from backend.inference.stage1_pipeline import Stage1Pipeline
-            _stage1_instance = Stage1Pipeline()
+        with _stage1_lock:
+            if _stage1_instance is None:  # pragma: no branch — inner race-resolution branch; unreachable in single-threaded tests.
+                if LEGOGEN_DEV:
+                    _stage1_instance = _MockStage1()
+                else:  # pragma: no cover — Stage1Pipeline() loads Qwen3.5-9B; LEGOGEN_DEV=1 in CI.
+                    from backend.inference.stage1_pipeline import Stage1Pipeline
+                    _stage1_instance = Stage1Pipeline()
     return _stage1_instance
 
 

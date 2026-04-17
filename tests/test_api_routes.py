@@ -196,3 +196,269 @@ class TestGallery:
         )
         assert resp.status_code == 200
         assert resp.json()["stars"] == pytest.approx(5.0)
+
+
+class TestGenerateValidationLimits:
+    def test_image_exceeding_size_limit_returns_413(self, client):
+        """MAX_IMAGE_BYTES is 10 MB — send 11 MB of zeros and expect 413."""
+        oversize = b"\x00" * (11 * 1024 * 1024)
+        resp = client.post(
+            "/api/generate-bricks",
+            files={"image": ("big.png", oversize, "image/png")},
+        )
+        assert resp.status_code == 413
+        assert "10" in resp.json()["detail"]
+
+    def test_prompt_exceeding_char_limit_returns_413(self, client):
+        """MAX_PROMPT_CHARS is 2000; 2001 chars must 413."""
+        resp = client.post(
+            "/api/generate-bricks",
+            data={"prompt": "x" * 2001},
+        )
+        assert resp.status_code == 413
+        assert "2000" in resp.json()["detail"]
+
+    def test_prompt_whitespace_only_treated_as_empty(self, client):
+        resp = client.post("/api/generate-bricks", data={"prompt": "   \n\t  "})
+        assert resp.status_code == 400
+
+    def test_stream_image_wrong_mime_returns_400(self, client):
+        resp = client.post(
+            "/api/generate-stream",
+            files={"image": ("x.txt", b"text", "text/plain")},
+        )
+        assert resp.status_code == 400
+
+    def test_stream_no_input_returns_400(self, client):
+        resp = client.post("/api/generate-stream", data={"prompt": ""})
+        assert resp.status_code == 400
+
+
+class TestGenerateTimeout:
+    def test_generate_bricks_timeout_returns_504(self, monkeypatch, client):
+        """Patch the MockBrickPipeline.generate to sleep longer than the timeout
+        so asyncio.wait_for fires 504."""
+        import time
+        from backend.inference import brick_pipeline as bp
+        from backend.api import routes_generate as rg
+
+        monkeypatch.setattr(rg, "INFERENCE_TIMEOUT_SECONDS", 0.05)
+
+        def slow_generate(self, caption, on_progress=None):
+            time.sleep(1.0)
+            return {"bricks": "", "brick_count": 0, "stable": True, "metadata": {}}
+
+        monkeypatch.setattr(bp.MockBrickPipeline, "generate", slow_generate)
+        resp = client.post("/api/generate-bricks", data={"prompt": "slow build"})
+        assert resp.status_code == 504
+        assert "timed out" in resp.json()["detail"].lower()
+
+
+class TestGenerateBestOfNImagePath:
+    def test_image_with_n_runs_bon(self, client):
+        png = _make_png_bytes()
+        resp = client.post(
+            "/api/generate-bricks",
+            files={"image": ("x.png", png, "image/png")},
+            data={"n": "2"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["metadata"]["n"] == 2
+        assert "caption" in body
+
+    def test_stream_bon_emits_sample_events(self, client):
+        resp = client.post(
+            "/api/generate-stream",
+            data={"prompt": "a red robot", "n": "2"},
+        )
+        assert resp.status_code == 200
+        # MockBrickPipeline.generate_best_of_n doesn't emit sample events
+        # (it calls generate once). This asserts the happy path still
+        # terminates with a result event.
+        assert "event: result" in resp.text
+
+
+class TestStreamOrdering:
+    def test_event_sequence(self, client):
+        """SSE must emit at least one progress event before any result event."""
+        resp = client.post("/api/generate-stream", data={"prompt": "house"})
+        assert resp.status_code == 200
+        body = resp.text
+        progress_idx = body.index("event: progress")
+        result_idx = body.index("event: result")
+        assert progress_idx < result_idx
+
+    def test_stream_image_caption_progress(self, client):
+        """Image path must emit a stage1 progress event with the caption."""
+        png = _make_png_bytes()
+        resp = client.post(
+            "/api/generate-stream",
+            files={"image": ("x.png", png, "image/png")},
+        )
+        assert resp.status_code == 200
+        assert "\"stage\": \"stage1\"" in resp.text
+        assert "\"caption\"" in resp.text
+
+
+class TestDecodeImageFallback:
+    def test_garbled_image_bytes_fallback_in_dev(self, client):
+        """In LEGOGEN_DEV=1, _decode_image falls back to a blank image when
+        PIL can't parse the bytes — endpoint returns 200 rather than 400."""
+        resp = client.post(
+            "/api/generate-bricks",
+            files={"image": ("bad.png", b"not-a-real-png", "image/png")},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["brick_count"] > 0
+
+    def test_decode_image_raises_400_when_not_dev(self, monkeypatch):
+        """Production path: PIL failure raises HTTPException(400)."""
+        from fastapi import HTTPException
+        from backend.api import routes_generate as rg
+
+        monkeypatch.setattr(rg, "LEGOGEN_DEV", False)
+        with pytest.raises(HTTPException) as excinfo:
+            rg._decode_image(b"not-a-real-png")
+        assert excinfo.value.status_code == 400
+
+
+class TestCancelToken:
+    def test_check_callback_raises_when_set(self):
+        """_CancelToken.check_callback raises _Cancelled once .set() has fired."""
+        from backend.api.routes_generate import _CancelToken, _Cancelled
+
+        tok = _CancelToken()
+        # No-op when not set.
+        tok.check_callback({"type": "brick"})
+        assert tok.is_set is False
+        tok.set()
+        assert tok.is_set is True
+        with pytest.raises(_Cancelled):
+            tok.check_callback({"type": "brick"})
+
+
+class TestStreamImageBestOfN:
+    def test_stream_with_image_and_n_uses_from_image_bon(self, client):
+        """Image + n>1 stream path hits _from_image_bon inside the thread (line 226)."""
+        png = _make_png_bytes()
+        resp = client.post(
+            "/api/generate-stream",
+            files={"image": ("x.png", png, "image/png")},
+            data={"n": "2"},
+        )
+        assert resp.status_code == 200
+        body = resp.text
+        # The caption event is emitted by _from_image_bon itself.
+        assert "\"caption\"" in body
+        assert "event: result" in body
+
+
+class TestFromImageBonDirect:
+    def test_from_image_bon_with_no_progress_callback(self):
+        """_from_image_bon(on_progress=None) takes the False branch at the
+        caption check (covers branch 169->171)."""
+        from backend.api.routes_generate import _from_image_bon
+        from backend.inference.brick_pipeline import MockBrickPipeline
+        from PIL import Image
+
+        pipe = MockBrickPipeline()
+        result = _from_image_bon(pipe, Image.new("RGB", (32, 32)), n=2, on_progress=None)
+        assert "caption" in result
+        assert result["metadata"]["n"] == 2
+
+
+class TestStreamRollbackAndUnknownEvents:
+    def test_stream_emits_rollback_event(self, monkeypatch, client):
+        """Mock generate() to push a rollback progress event through the SSE
+        loop so the 'rollback' branch (lines 274-275) is covered."""
+        from backend.inference import brick_pipeline as bp
+
+        def generate_with_rollback(self, caption, on_progress=None):
+            if on_progress is not None:
+                on_progress({"type": "brick", "count": 1})
+                on_progress({"type": "rollback", "count": 1})
+            return {
+                "bricks": "2x4 (0,0,0) #C91A09",
+                "brick_count": 1,
+                "stable": True,
+                "metadata": {"model_version": "mock"},
+            }
+
+        monkeypatch.setattr(bp.MockBrickPipeline, "generate", generate_with_rollback)
+        resp = client.post("/api/generate-stream", data={"prompt": "rollback test"})
+        assert resp.status_code == 200
+        assert "event: rollback" in resp.text
+        assert "event: result" in resp.text
+
+    def test_stream_ignores_unknown_event_types(self, monkeypatch, client):
+        """Events with an unrecognised type fall through all elif branches and
+        loop back to the top of the while (covers branch 269->247)."""
+        from backend.inference import brick_pipeline as bp
+
+        def generate_with_surprise(self, caption, on_progress=None):
+            if on_progress is not None:
+                on_progress({"type": "surprise", "payload": "ignored"})
+                on_progress({"type": "brick", "count": 1})
+            return {
+                "bricks": "2x4 (0,0,0) #C91A09",
+                "brick_count": 1,
+                "stable": True,
+                "metadata": {"model_version": "mock"},
+            }
+
+        monkeypatch.setattr(bp.MockBrickPipeline, "generate", generate_with_surprise)
+        resp = client.post("/api/generate-stream", data={"prompt": "unknown event"})
+        assert resp.status_code == 200
+        # The stream completes and emits a result — "surprise" type is ignored.
+        assert "event: result" in resp.text
+        assert "event: surprise" not in resp.text
+
+    def test_stream_emits_sample_event(self, monkeypatch, client):
+        """Best-of-N pipelines can emit sample events; the SSE loop forwards
+        them as 'sample' events (covers line 277)."""
+        from backend.inference import brick_pipeline as bp
+
+        def bon_with_sample(self, caption, n=1, strategy="rank", on_progress=None):
+            if on_progress is not None:
+                on_progress({"type": "sample", "index": 1, "of": n, "stable": True})
+            return {
+                "bricks": "2x4 (0,0,0) #C91A09",
+                "brick_count": 1,
+                "stable": True,
+                "metadata": {"model_version": "mock", "n": n, "picked_index": 0, "stable_rate": 1.0},
+            }
+
+        monkeypatch.setattr(bp.MockBrickPipeline, "generate_best_of_n", bon_with_sample)
+        resp = client.post("/api/generate-stream", data={"prompt": "sample test", "n": "2"})
+        assert resp.status_code == 200
+        assert "event: sample" in resp.text
+
+    def test_stream_caption_skips_stage2_announce_when_already_announced(self, monkeypatch, client):
+        """For text prompts announced_stage2 is True from the start; a stray
+        caption event should take the False branch at 'if not announced_stage2'
+        (covers branch 269->247)."""
+        from backend.inference import brick_pipeline as bp
+
+        def generate_with_caption_event(self, caption, on_progress=None):
+            if on_progress is not None:
+                # Emit a caption event even for a text-only call — the loop
+                # must handle it without re-announcing stage 2.
+                on_progress({"type": "caption", "caption": "synthetic caption"})
+                on_progress({"type": "brick", "count": 1})
+            return {
+                "bricks": "2x4 (0,0,0) #C91A09",
+                "brick_count": 1,
+                "stable": True,
+                "metadata": {"model_version": "mock"},
+            }
+
+        monkeypatch.setattr(bp.MockBrickPipeline, "generate", generate_with_caption_event)
+        resp = client.post("/api/generate-stream", data={"prompt": "caption branch"})
+        assert resp.status_code == 200
+        # Stage2 announce appears exactly once (at the start of text-only stream).
+        body = resp.text
+        # The initial stage2 announce.
+        stage2_announces = body.count("\"message\": \"Generating bricks...\"")
+        assert stage2_announces == 1

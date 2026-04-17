@@ -1,6 +1,11 @@
 import pytest
 from backend.brick.parser import Brick
-from backend.brick.stability import is_stable, find_first_unstable
+from backend.brick.stability import (
+    is_stable,
+    find_first_unstable,
+    _stud_positions,
+    _is_connected,
+)
 
 
 # ── Legacy tests — physically reasonable, preserved verbatim ────────────
@@ -101,3 +106,23 @@ def test_counterweighted_cantilever_stable():
         Brick(h=2, w=8, x=0, y=2, z=2, color="F2CD37"),   # lid — spans anchor & beam
     ]
     assert is_stable(bricks)
+
+
+# ── Private-helper coverage ──────────────────────────────────────────────
+
+
+def test_stud_positions_empty_when_bricks_disjoint_in_xy():
+    """Two bricks with non-overlapping XY footprints produce no stud contacts."""
+    a = Brick(h=2, w=2, x=0, y=0, z=0, color="C91A09")
+    b = Brick(h=2, w=2, x=5, y=5, z=1, color="05131D")
+    assert _stud_positions(a, b) == []
+
+
+def test_is_connected_empty_list_returns_true():
+    """Zero-brick structure is trivially connected."""
+    assert _is_connected([]) is True
+
+
+def test_is_stable_empty_list_returns_true():
+    """is_stable([]) short-circuits to True via _solve_equilibrium's n==0 branch."""
+    assert is_stable([]) is True

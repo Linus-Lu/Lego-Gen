@@ -66,3 +66,32 @@ def test_cluster_and_pick_falls_back_to_rank_when_stable_equals_k():
     picked = cluster_and_pick(cands, k=2, seed=0)
     # Rank picks the larger stable build.
     assert picked["brick_count"] == 8
+
+
+def test_structural_features_empty_bricks_returns_zero_vector():
+    import numpy as np
+    out = structural_features([])
+    assert out.shape == (9,)
+    assert np.allclose(out, 0.0)
+
+
+def test_cluster_and_pick_all_unstable_falls_back_to_rank():
+    """Zero stable candidates → fall through rank_candidates. Ranking
+    prefers stable, so this returns the unstable candidate with the most
+    bricks (all are unstable so stability is a tie)."""
+    cands = [
+        {"bricks": [Brick(2, 4, 0, 0, 0, "C91A09")] * 3, "stable": False, "brick_count": 3},
+        {"bricks": [Brick(2, 4, 0, 0, 0, "C91A09")] * 7, "stable": False, "brick_count": 7},
+        {"bricks": [Brick(2, 4, 0, 0, 0, "C91A09")] * 2, "stable": False, "brick_count": 2},
+    ]
+    picked = cluster_and_pick(cands, k=2, seed=0)
+    assert picked["brick_count"] == 7
+
+
+def test_rank_candidates_is_deterministic_on_ties():
+    """Identical candidates → original order preserved (earlier wins)."""
+    a = {"bricks": [], "stable": True, "brick_count": 5}
+    b = {"bricks": [], "stable": True, "brick_count": 5}
+    ranked = rank_candidates([a, b])
+    assert ranked[0] is a
+    assert ranked[1] is b

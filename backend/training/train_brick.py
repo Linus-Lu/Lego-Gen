@@ -35,7 +35,7 @@ from backend.config import (
     BRICK_MODEL_NAME, BRICK_CHECKPOINT_DIR, BRICK_LEARNING_RATE,
     BRICK_BATCH_SIZE, BRICK_GRADIENT_ACCUMULATION, BRICK_MAX_SEQ_LENGTH,
     BRICK_NUM_EPOCHS, BRICK_LORA_R, BRICK_LORA_ALPHA, BRICK_LORA_DROPOUT,
-    BRICK_TRAINING_DATA,
+    BRICK_TRAINING_DATA, USE_BF16,
 )
 
 
@@ -147,11 +147,19 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", type=str, default=None,
                         help="Checkpoint path to resume from, or 'auto' for latest")
-    args, _ = parser.parse_known_args()
+    parser.add_argument("--output-dir", type=str, default=str(BRICK_CHECKPOINT_DIR),
+                        help="Directory to save adapter checkpoints")
+    parser.add_argument("--epochs", type=int, default=BRICK_NUM_EPOCHS,
+                        help="Number of training epochs")
+    parser.add_argument("--no-wandb", action="store_true",
+                        help="Disable Weights & Biases logging")
+    # parse_args (not parse_known_args) so unknown flags surface as errors;
+    # the silent-drop behaviour previously here hid typos in scripts.
+    args = parser.parse_args()
 
     # Auto-detect latest checkpoint
     if args.resume is None or args.resume == "auto":
-        ckpt_dir = Path(str(BRICK_CHECKPOINT_DIR))
+        ckpt_dir = Path(str(args.output_dir))
         if ckpt_dir.exists():
             checkpoints = sorted(
                 ckpt_dir.glob("checkpoint-*"),
@@ -186,6 +194,11 @@ def main() -> None:
         BRICK_MODEL_NAME, torch_dtype="auto", trust_remote_code=True,
     )
 
+    # PEFT warns that DoRA + PiSSA is not a supported combination: PiSSA
+    # factorises the base weights via SVD and stores the residual back into
+    # the base, and DoRA then decomposes magnitude/direction of those
+    # residual weights — the stacked init produces unstable training.
+    # Stick with standard Kaiming init plus DoRA + rsLoRA, matching Stage 1.
     lora_config = LoraConfig(
         r=BRICK_LORA_R, lora_alpha=BRICK_LORA_ALPHA,
         lora_dropout=BRICK_LORA_DROPOUT,
@@ -193,7 +206,6 @@ def main() -> None:
         task_type="CAUSAL_LM",
         use_dora=True,
         use_rslora=True,
-        init_lora_weights="pissa",
     )
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
@@ -207,19 +219,21 @@ def main() -> None:
         "test": str(test_path),
     })
 
-    # ── Curriculum ordering ──────────────────────────────────────────
-    print("Building curriculum ordering...", flush=True)
-    train_ds, n_untruncated = apply_curriculum_ordering(ds["train"], BRICK_MAX_SEQ_LENGTH)
+    # NOTE: HF Trainer shuffles with RandomSampler / DistributedSampler every
+    # epoch, which destroys any prefix ordering — so we no longer pre-sort
+    # the dataset. ``apply_curriculum_ordering`` is still exported for callers
+    # that build their own DataLoader with ``shuffle=False``.
+    train_ds = ds["train"]
 
     # ── Structure-aware loss weights ─────────────────────────────────
     structure_weights = BrickStructureWeights(tokenizer)
 
-    output_dir = str(BRICK_CHECKPOINT_DIR)
+    output_dir = str(args.output_dir)
 
     # ── Build training args (version-adaptive) ────────────────────────
     base_kwargs = dict(
         output_dir=output_dir,
-        num_train_epochs=BRICK_NUM_EPOCHS,
+        num_train_epochs=args.epochs,
         per_device_train_batch_size=BRICK_BATCH_SIZE,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=BRICK_GRADIENT_ACCUMULATION,
@@ -228,7 +242,8 @@ def main() -> None:
         warmup_steps=100,
         max_grad_norm=0.5,
         optim="adamw_torch",
-        bf16=True,
+        bf16=USE_BF16,
+        fp16=not USE_BF16 and torch.cuda.is_available(),
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         logging_steps=10,
@@ -239,7 +254,7 @@ def main() -> None:
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
-        report_to="wandb",
+        report_to="none" if args.no_wandb else "wandb",
         dataloader_pin_memory=True,
         dataloader_num_workers=4,
     )

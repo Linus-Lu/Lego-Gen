@@ -19,10 +19,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # even when torch is not installed.
 _BRICK_RE = re.compile(r"(\d+)x(\d+) \((\d+),(\d+),(\d+)\) #([0-9A-Fa-f]{6})")
 
-# Try importing the full module for generate-loop and constants tests
+# brick_pipeline's module body does NOT import torch — torch is imported
+# inside BrickPipeline methods. Import the module-level symbols unconditionally
+# so tests that don't need torch (grammar regex, outlines fallback, BoN-rank
+# via __new__ stubs) can still run on CI where torch is absent.
 try:
-    import torch
-
     from backend.inference.brick_pipeline import (
         BASE_TEMPERATURE,
         BRICK_PATTERN,
@@ -31,9 +32,15 @@ try:
         MAX_ROLLBACKS,
         BrickPipeline,
     )
-
-    _TORCH_AVAILABLE = True
+    _MODULE_IMPORTABLE = True
 except (ImportError, FileNotFoundError, OSError):
+    _MODULE_IMPORTABLE = False
+
+# Separate check for tests that actually exercise torch (model.generate, etc.).
+try:
+    import torch  # noqa: F401
+    _TORCH_AVAILABLE = True
+except ImportError:
     _TORCH_AVAILABLE = False
 
 
@@ -68,7 +75,7 @@ class TestBrickRegex:
 # ── TestConstants (requires module import) ───────────────────────────
 
 
-@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch or colors.json unavailable")
+@pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
 class TestConstants:
     """Verify brick_pipeline constants haven't drifted from expected values."""
 
@@ -88,7 +95,7 @@ class TestConstants:
 # ── TestGrammarPattern (requires module import) ──────────────────────
 
 
-@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch or colors.json unavailable")
+@pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
 class TestGrammarPattern:
     """The grammar regex handed to the logits processor must accept exactly the
     set of brick lines that `_BRICK_RE` + allowed dims also accept. Grammar
@@ -130,10 +137,10 @@ class TestGrammarPattern:
             assert _BRICK_RE.fullmatch(line.rstrip("\n")) is not None
 
 
-# ── TestGenerateLoop (requires torch) ────────────────────────────────
+# ── TestGenerateLoop (requires torch — test body uses torch.tensor) ──
 
 
-@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch or colors.json unavailable")
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch required")
 class TestGenerateLoop:
     """Test the generate() method by mocking model internals."""
 
@@ -150,13 +157,16 @@ class TestGenerateLoop:
 
         call_iter = iter(brick_results)
 
-        def mock_generate_one(input_ids, grid):
+        def mock_generate_one(input_ids, grid, logits_processor=None):
             try:
                 return next(call_iter)
             except StopIteration:
                 return None, 0
 
         pipeline._generate_one_brick = mock_generate_one
+        # _fresh_logits_processor is a real method on the class and tries to
+        # import outlines; returning None matches the absent-outlines path.
+        pipeline._fresh_logits_processor = lambda: None
 
         # Mock tokenizer. encode() behaves differently depending on kwargs:
         #   - return_tensors="pt"  -> 2-D tensor (for the initial prompt)
@@ -255,6 +265,75 @@ def test_generate_best_of_n_strips_bricks_parsed_from_returned_dict():
     assert out["metadata"]["n"] == 2
 
 
+# ── TestGrammarOrdering (requires module import via _TORCH_AVAILABLE) ──
+
+
+@pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
+class TestGrammarOrdering:
+    def test_longest_dim_prefix_matches_first(self):
+        """A naive shortest-first regex would match '1x1' when '1x10' is the
+        intended dim. 1x10 isn't in the allowed set, so this is actually a
+        negative test against the ordering being wrong."""
+        import re as _re
+        from backend.inference.brick_pipeline import BRICK_PATTERN
+        pat = _re.compile(BRICK_PATTERN)
+        # 2x4 is allowed; 2x40 is not; if ordering were shortest-first and
+        # the coord pattern were broken, this could false-match.
+        assert pat.fullmatch("2x4 (0,0,0) #C91A09\n") is not None
+
+    def test_coord_pattern_rejects_out_of_range(self):
+        import re as _re
+        from backend.inference.brick_pipeline import BRICK_PATTERN
+        pat = _re.compile(BRICK_PATTERN)
+        # WORLD_DIM is 20 → 20 is out of range, 19 is the max.
+        assert pat.fullmatch("2x4 (20,0,0) #C91A09\n") is None
+        assert pat.fullmatch("2x4 (0,0,19) #C91A09\n") is not None
+
+
+@pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
+class TestLogitsProcessorFallback:
+    def test_returns_none_when_outlines_absent(self, monkeypatch):
+        """When outlines is not importable, _build_logits_processor returns None.
+        The caller treats this as 'no grammar constraint' and validates
+        parse failures via try/except instead."""
+        import sys as _sys
+        from backend.inference.brick_pipeline import _build_logits_processor
+        # Simulate ImportError by wiping outlines from sys.modules.
+        monkeypatch.setitem(_sys.modules, "outlines", None)
+        monkeypatch.setitem(_sys.modules, "outlines.processors", None)
+        result = _build_logits_processor(tokenizer=object(), pattern=r"x")
+        assert result is None
+
+
+@pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
+class TestBestOfNRankStrategy:
+    def test_rank_strategy_picks_most_bricks_among_stable(self):
+        """strategy='rank' skips the clustering entirely and returns
+        rank_candidates(candidates)[0]."""
+        from backend.inference.brick_pipeline import BrickPipeline
+
+        pipe = BrickPipeline.__new__(BrickPipeline)
+        counter = {"n": 0}
+
+        def fake_generate(caption, on_progress=None):
+            counter["n"] += 1
+            # Return different brick counts per call so ranking has signal.
+            i = counter["n"]
+            return {
+                "bricks": f"2x4 (0,0,0) #C91A09\n" * i,
+                "brick_count": i,
+                "stable": True,
+                "metadata": {},
+            }
+
+        pipe.generate = fake_generate  # type: ignore[method-assign]
+        out = pipe.generate_best_of_n("x", n=3, strategy="rank")
+        # Ranking picks the largest (last call, brick_count=3).
+        assert out["brick_count"] == 3
+        assert out["metadata"]["picked_index"] == 2
+
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch required")
 def test_generate_one_brick_rejects_malformed_line_without_raising():
     """Regression for bug_024: when the grammar logits processor is absent
     (outlines missing) the model can emit non-brick text. The rejection

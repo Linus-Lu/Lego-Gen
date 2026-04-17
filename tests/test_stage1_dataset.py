@@ -120,3 +120,80 @@ def test_load_st2b_captions_by_category(tmp_path):
     # Labels for 'chair' category should contain object text about chairs
     chair_objects = [lbl["object"].lower() for lbl in result["chair"]]
     assert any("chair" in obj for obj in chair_objects)
+
+
+def test_load_st2b_captions_skips_invalid_json(tmp_path):
+    """Files that fail JSON parsing must be silently skipped, not crash."""
+    # A valid chair label alongside a broken file.
+    (tmp_path / "chair.json").write_text(json.dumps(CHAIR_LABEL))
+    (tmp_path / "broken.json").write_text("not json {")
+    result = load_st2b_captions_by_category(tmp_path)
+    # Valid one still picked up; broken one ignored.
+    assert "chair" in result
+    assert len(result["chair"]) == 1
+
+
+def test_load_st2b_captions_skips_empty_object_field(tmp_path):
+    """Labels with an empty/missing 'object' field must be skipped."""
+    empty_label = {"set_id": "empty-1", "object": ""}
+    (tmp_path / "empty.json").write_text(json.dumps(empty_label))
+    result = load_st2b_captions_by_category(tmp_path)
+    # Nothing landed in any category — the empty label was skipped.
+    assert all(len(v) == 0 for v in result.values()) or result == {}
+
+
+def test_match_coco_to_st2b_mapped_but_no_candidates():
+    """COCO category maps to an ST2B type but that type has no entries → None."""
+    # 'chair' is in COCO_TO_ST2B_CATEGORY but the dict is empty so candidates=[].
+    result = match_coco_to_st2b("chair", {}, seed=42)
+    assert result is None
+
+
+# ── Branch coverage for generate_description_from_label ──
+
+
+def test_generate_description_empty_label_returns_empty_string():
+    """Label with no obj/colors/dims fields produces empty string (parts is empty)."""
+    description = generate_description_from_label({})
+    assert description == ""
+
+
+def test_generate_description_obj_only():
+    """Only 'object' present → skips colors and dims branches."""
+    description = generate_description_from_label({"object": "a small chair"})
+    assert description == "a small chair."
+    assert "primarily" not in description
+    assert "form factor" not in description
+
+
+def test_generate_description_skips_colors_when_absent():
+    """No dominant_colors → the colors clause is skipped (132->136 branch)."""
+    label = {
+        "object": "a red chair",
+        "dimensions_estimate": {"width": "small"},
+    }
+    description = generate_description_from_label(label)
+    assert "primarily" not in description
+    assert "form factor" in description
+
+
+def test_generate_description_skips_dims_when_absent():
+    """No dimensions_estimate → the dims clause is skipped (136->144 branch)."""
+    label = {
+        "object": "a red chair",
+        "dominant_colors": ["Red"],
+    }
+    description = generate_description_from_label(label)
+    assert "primarily" in description
+    assert "form factor" not in description
+
+
+def test_generate_description_skips_dims_when_all_empty():
+    """dims present but all fields empty → size_parts is [] (141->144 branch)."""
+    label = {
+        "object": "a chair",
+        "dimensions_estimate": {"width": "", "height": "", "depth": ""},
+    }
+    description = generate_description_from_label(label)
+    assert "form factor" not in description
+    assert description == "a chair."
