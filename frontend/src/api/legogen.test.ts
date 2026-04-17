@@ -212,3 +212,167 @@ describe('Gallery client', () => {
     await expect(starGalleryBuild('x', 3)).rejects.toThrow('HTTP 500');
   });
 });
+
+import { generateBricksStream } from './legogen';
+
+function sseResponse(chunks: string[]): Response {
+  const stream = new ReadableStream({
+    start(controller) {
+      const enc = new TextEncoder();
+      for (const c of chunks) controller.enqueue(enc.encode(c));
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+  });
+}
+
+describe('generateBricksStream', () => {
+  const fetchMock = vi.fn();
+  beforeEach(() => {
+    fetchMock.mockReset();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('parses progress, brick, rollback, sample, result events', async () => {
+    const result = {
+      bricks: '2x4 (0,0,0) #C91A09',
+      brick_count: 1,
+      stable: true,
+      metadata: { model_version: 'mock', generation_time_ms: 1, rejections: 0, rollbacks: 0 },
+    };
+    fetchMock.mockResolvedValueOnce(sseResponse([
+      'event: progress\ndata: {"stage":"stage1","message":"go","caption":"c"}\n\n',
+      'event: brick\ndata: {"count":1}\n\n',
+      'event: rollback\ndata: {"count":1}\n\n',
+      'event: sample\ndata: {"index":1,"of":2,"stable":true}\n\n',
+      'event: result\ndata: ' + JSON.stringify(result) + '\n\n',
+    ]));
+    const events: any[] = [];
+    const out = await generateBricksStream({
+      prompt: 'x',
+      onEvent: e => events.push(e),
+    });
+    expect(events.map(e => e.type)).toEqual(['progress', 'brick', 'rollback', 'sample']);
+    expect(out).toEqual(result);
+  });
+
+  it('throws when server emits an error event', async () => {
+    fetchMock.mockResolvedValueOnce(sseResponse([
+      'event: error\ndata: {"detail":"boom"}\n\n',
+    ]));
+    await expect(generateBricksStream({
+      prompt: 'x',
+      onEvent: () => {},
+    })).rejects.toThrow('boom');
+  });
+
+  it('throws when stream ends without result', async () => {
+    fetchMock.mockResolvedValueOnce(sseResponse([
+      'event: progress\ndata: {"stage":"stage1","message":"..."}\n\n',
+    ]));
+    await expect(generateBricksStream({
+      prompt: 'x',
+      onEvent: () => {},
+    })).rejects.toThrow('Stream ended without result');
+  });
+
+  it('throws with server detail on non-ok response', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ detail: 'bad' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    await expect(generateBricksStream({
+      prompt: 'x',
+      onEvent: () => {},
+    })).rejects.toThrow('bad');
+  });
+
+  it('throws fallback message when non-ok body lacks JSON', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('not json', { status: 502 }));
+    // Match legogen.ts behavior: res.json().catch returns { detail: 'Request failed' },
+    // so the thrown message is 'Request failed' (not 'HTTP 502').
+    await expect(generateBricksStream({
+      prompt: 'x',
+      onEvent: () => {},
+    })).rejects.toThrow('Request failed');
+  });
+
+  it('throws when response has no body', async () => {
+    const noBody = new Response(null, { status: 200 });
+    Object.defineProperty(noBody, 'body', { value: null });
+    fetchMock.mockResolvedValueOnce(noBody);
+    await expect(generateBricksStream({
+      prompt: 'x',
+      onEvent: () => {},
+    })).rejects.toThrow('No response body');
+  });
+
+  it('ignores malformed event chunks', async () => {
+    const result = {
+      bricks: '', brick_count: 0, stable: true,
+      metadata: { model_version: 'm', generation_time_ms: 0, rejections: 0, rollbacks: 0 },
+    };
+    fetchMock.mockResolvedValueOnce(sseResponse([
+      'event: progress\ndata: this-is-not-json\n\n',  // JSON parse error — skipped
+      ':\n\n',                                         // comment-only, no event/data
+      'event: result\ndata: ' + JSON.stringify(result) + '\n\n',
+    ]));
+    const events: any[] = [];
+    const out = await generateBricksStream({
+      prompt: 'x',
+      onEvent: e => events.push(e),
+    });
+    expect(events).toEqual([]);
+    expect(out).toEqual(result);
+  });
+
+  it('forwards multipart fields (image, prompt, n)', async () => {
+    const result = {
+      bricks: '', brick_count: 0, stable: true,
+      metadata: { model_version: 'm', generation_time_ms: 0, rejections: 0, rollbacks: 0 },
+    };
+    fetchMock.mockResolvedValueOnce(sseResponse([
+      'event: result\ndata: ' + JSON.stringify(result) + '\n\n',
+    ]));
+    const file = new File([new Uint8Array([1])], 'x.png', { type: 'image/png' });
+    await generateBricksStream({
+      image: file, prompt: 'hi', n: 3, onEvent: () => {},
+    });
+    const [, init] = fetchMock.mock.calls[0];
+    const body = init.body as FormData;
+    expect(body.get('image')).toBeInstanceOf(File);
+    expect(body.get('prompt')).toBe('hi');
+    expect(body.get('n')).toBe('3');
+  });
+
+  it('caller AbortSignal aborts the fetch', async () => {
+    const ctrl = new AbortController();
+    fetchMock.mockImplementationOnce((_url, init) => {
+      return new Promise((_, reject) => {
+        init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      });
+    });
+    const promise = generateBricksStream({
+      prompt: 'x', onEvent: () => {}, signal: ctrl.signal,
+    });
+    ctrl.abort();
+    await expect(promise).rejects.toThrow(/abort/i);
+  });
+
+  it('timeout aborts the fetch', async () => {
+    fetchMock.mockImplementationOnce((_url, init) => {
+      return new Promise((_, reject) => {
+        init.signal.addEventListener('abort', () => reject(new DOMException('timeout', 'AbortError')));
+      });
+    });
+    await expect(generateBricksStream({
+      prompt: 'x', onEvent: () => {}, timeoutMs: 5,
+    })).rejects.toThrow(/abort|timeout/i);
+  });
+});
