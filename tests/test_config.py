@@ -56,6 +56,36 @@ def test_device_branch_with_torch_absent(monkeypatch):
     importlib.reload(cfg)
 
 
+def test_device_branch_with_torch_present(monkeypatch):
+    """Simulate torch being importable with cuda.is_available() == False.
+
+    CI does not install torch, so the success branch of the try/except is
+    otherwise never exercised. Fake a torch module with the two attributes
+    config.py reads, reload, and check that DEVICE / USE_BF16 come from the
+    cuda.is_available() path (not the ImportError fallback).
+    """
+    import types
+    real_torch = sys.modules.get("torch")
+    fake_torch = types.ModuleType("torch")
+    fake_cuda = types.ModuleType("torch.cuda")
+    fake_cuda.is_available = lambda: False
+    fake_cuda.is_bf16_supported = lambda: False
+    fake_torch.cuda = fake_cuda
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "torch.cuda", fake_cuda)
+    import backend.config as cfg
+    importlib.reload(cfg)
+    assert cfg.DEVICE == "cpu"
+    assert cfg.USE_BF16 is False
+    # Restore.
+    if real_torch is not None:
+        monkeypatch.setitem(sys.modules, "torch", real_torch)
+    else:
+        monkeypatch.delitem(sys.modules, "torch", raising=False)
+    monkeypatch.delitem(sys.modules, "torch.cuda", raising=False)
+    importlib.reload(cfg)
+
+
 def test_training_hyperparameters_set():
     """Guard against accidentally zero-ing a hyperparameter."""
     import backend.config as cfg
