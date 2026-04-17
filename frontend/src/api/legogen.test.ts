@@ -365,6 +365,28 @@ describe('generateBricksStream', () => {
     await expect(promise).rejects.toThrow(/abort/i);
   });
 
+  it('pre-aborted caller signal aborts before fetch starts', async () => {
+    const ctrl = new AbortController();
+    ctrl.abort();  // already aborted before the call
+    fetchMock.mockImplementationOnce((_url, init) => {
+      // The combined timeoutCtl signal should already be aborted by the time
+      // fetch runs, so this either rejects immediately or the function bails
+      // before calling fetch at all. Either outcome manifests as an AbortError.
+      return new Promise((_, reject) => {
+        if (init.signal.aborted) {
+          reject(new DOMException('aborted', 'AbortError'));
+        } else {
+          init.signal.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError')),
+          );
+        }
+      });
+    });
+    await expect(generateBricksStream({
+      prompt: 'x', onEvent: () => {}, signal: ctrl.signal,
+    })).rejects.toThrow(/abort/i);
+  });
+
   it('timeout aborts the fetch', async () => {
     fetchMock.mockImplementationOnce((_url, init) => {
       return new Promise((_, reject) => {

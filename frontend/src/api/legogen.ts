@@ -148,7 +148,10 @@ export async function generateBricksStream(
   const timeoutMs = opts.timeoutMs ?? DEFAULT_STREAM_TIMEOUT_MS;
   const timeoutId = setTimeout(() => timeoutCtl.abort(), timeoutMs);
   const onCallerAbort = () => timeoutCtl.abort();
-  opts.signal?.addEventListener('abort', onCallerAbort);
+  // If the caller's signal is already aborted, addEventListener won't fire —
+  // propagate the abort up front so fetch never starts.
+  if (opts.signal?.aborted) timeoutCtl.abort();
+  else opts.signal?.addEventListener('abort', onCallerAbort);
 
   try {
     const res = await fetch(`${API_BASE}/api/generate-stream`, {

@@ -55,14 +55,19 @@ async def _read_image_bounded(image: UploadFile) -> bytes:
 
 
 def _validate_prompt(prompt: str) -> str:
-    """Trim whitespace and enforce the prompt length cap."""
-    stripped = prompt.strip() if prompt else ""
-    if len(stripped) > MAX_PROMPT_CHARS:
+    """Trim whitespace and enforce the prompt length cap.
+
+    The cap is applied to the RAW input first — ``' ' * 500000 + 'a'`` would
+    strip down to one character and slip past a post-strip check, but we want
+    to reject oversized payloads from unauthenticated clients regardless of
+    whether the characters are whitespace.
+    """
+    if prompt and len(prompt) > MAX_PROMPT_CHARS:
         raise HTTPException(
             status_code=413,
             detail=f"Prompt exceeds {MAX_PROMPT_CHARS} characters",
         )
-    return stripped
+    return prompt.strip() if prompt else ""
 
 
 @router.post("/generate-bricks")

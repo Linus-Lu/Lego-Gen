@@ -85,7 +85,10 @@ export default function BuildSession() {
       const firstWord = (res.caption ?? prompt ?? 'build').split(/\s+/).slice(0, 3).join(' ');
       setTitle(firstWord ? firstWord.charAt(0).toUpperCase() + firstWord.slice(1) : 'Untitled');
     } catch (e: any) {
-      if (e?.name === 'AbortError' || controller.signal.aborted) return;
+      // Only swallow the error if the caller intentionally aborted. A bare
+      // AbortError without controller.signal.aborted means the SSE client's
+      // internal timeout fired — that's a real failure the user should see.
+      if (controller.signal.aborted) return;
       setError(e?.message ?? 'Generation failed');
       setStage('error');
     }
