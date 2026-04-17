@@ -1,0 +1,33 @@
+# Coverage configuration only. The project has no packaging metadata —
+# CLAUDE.md notes that no pyproject.toml / setup.cfg / pytest.ini exists
+# by design; this file is strictly `[tool.coverage.*]`.
+
+[tool.coverage.run]
+branch = true
+source = ["backend"]
+# Files excluded entirely because every line loads torch/transformers or
+# orchestrates a dataset download that can't run in CI.
+omit = [
+    "backend/training/train_stage1.py",
+    "backend/training/train_brick.py",
+    "backend/training/utils.py",
+    "backend/data_pipeline/dataset_stage1.py",
+    "backend/inference/stage1_pipeline.py",
+]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_covered = false
+exclude_also = [
+    # Type-checking only branches
+    "if TYPE_CHECKING:",
+    # CLI entry points
+    "if __name__ == .__main__.:",
+    # Defensive re-raise after logging etc.
+    "raise NotImplementedError",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+addopts = "--cov --cov-report=term-missing"
