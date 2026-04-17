@@ -16,12 +16,10 @@ def seeded_colors(monkeypatch):
         "000000": "Black",
         "0055BF": "Blue",
     }
-    # Pre-populate the memoized cache used by _lazy_palette.
-    const._lazy_palette._cache = fake_palette  # type: ignore[attr-defined]
-    yield fake_palette
-    # Reset so other tests don't inherit the fake palette.
-    if hasattr(const._lazy_palette, "_cache"):
-        del const._lazy_palette._cache
+    # monkeypatch.setattr restores the previous state (including "attribute did
+    # not exist") on teardown, so the cache doesn't leak into other tests.
+    monkeypatch.setattr(const._lazy_palette, "_cache", fake_palette, raising=False)
+    return fake_palette
 
 
 def test_allowed_dims_populated():
