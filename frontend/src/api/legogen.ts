@@ -22,6 +22,16 @@ export interface BrickResponse {
     generation_time_ms: number;
     rejections: number;
     rollbacks: number;
+    termination_reason?: string;
+    final_stable?: boolean;
+    outlines_enabled?: boolean;
+    palette_validation_enabled?: boolean;
+    hit_max_rejections?: boolean;
+    hit_max_rollbacks?: boolean;
+    n?: number;
+    picked_index?: number;
+    stable_rate?: number;
+    selection_strategy?: string;
   };
 }
 
@@ -96,11 +106,13 @@ export async function generateBricks(
   image?: File,
   prompt?: string,
   n?: number,
+  requireStable?: boolean,
 ): Promise<BrickResponse> {
   const form = new FormData();
   if (image) form.append('image', image);
   if (prompt) form.append('prompt', prompt);
   if (n !== undefined) form.append('n', String(n));
+  if (requireStable !== undefined) form.append('require_stable', String(requireStable));
 
   const res = await fetch(`${API_BASE}/api/generate-bricks`, {
     method: 'POST',
@@ -131,6 +143,7 @@ export async function generateBricksStream(
     image?: File;
     prompt?: string;
     n?: number;
+    requireStable?: boolean;
     onEvent: (evt: StreamEvent) => void;
     signal?: AbortSignal;
     timeoutMs?: number;
@@ -140,6 +153,7 @@ export async function generateBricksStream(
   if (opts.image) form.append('image', opts.image);
   if (opts.prompt) form.append('prompt', opts.prompt);
   if (opts.n !== undefined) form.append('n', String(opts.n));
+  if (opts.requireStable !== undefined) form.append('require_stable', String(opts.requireStable));
 
   // Combine the caller's abort signal with our own timeout signal so either
   // one can short-circuit a hung stream. Without this the fetch+reader can
@@ -264,4 +278,31 @@ export async function starGalleryBuild(id: string, stars: number): Promise<Galle
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
+}
+
+export async function downloadLDraw(title: string, bricks: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/export-ldr`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, bricks }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error(err.detail ?? `HTTP ${res.status}`);
+  }
+
+  const text = await res.text();
+  const disposition = res.headers.get('Content-Disposition') ?? '';
+  const filenameMatch = disposition.match(/filename="([^"]+)"/i);
+  const filename = filenameMatch?.[1] ?? 'legogen-build.ldr';
+
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }

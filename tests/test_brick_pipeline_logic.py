@@ -31,6 +31,7 @@ try:
         MAX_REJECTIONS,
         MAX_ROLLBACKS,
         BrickPipeline,
+        _color_is_allowed,
     )
     _MODULE_IMPORTABLE = True
 except (ImportError, FileNotFoundError, OSError):
@@ -121,20 +122,33 @@ class TestGrammarPattern:
         assert pat.fullmatch("2x4 (0,0,0) #C91A0\n") is None     # short hex
         assert pat.fullmatch("") is None
 
+    def test_rejects_colors_outside_palette(self):
+        pat = re.compile(BRICK_PATTERN)
+        assert pat.fullmatch("2x4 (0,0,0) #123456\n") is None
+
     def test_grammar_matches_are_parseable_by_backend_regex(self):
         """Anything the grammar accepts must also match the parser regex,
         so that `parse_brick` cannot raise after a grammar-constrained decode."""
         pat = re.compile(BRICK_PATTERN)
         samples = [
             "2x4 (5,3,0) #C91A09\n",
-            "1x1 (0,0,0) #000000\n",
+            "1x1 (0,0,0) #05131D\n",
             "8x1 (19,19,19) #FFFFFF\n",
-            "2x6 (10,0,5) #abcdef\n",
+            "2x6 (10,0,5) #0055BF\n",
         ]
         for line in samples:
             assert pat.fullmatch(line) is not None
             # _BRICK_RE has no trailing newline, so strip before matching
             assert _BRICK_RE.fullmatch(line.rstrip("\n")) is not None
+
+
+@pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
+class TestPaletteValidation:
+    def test_palette_accepts_known_color(self):
+        assert _color_is_allowed("C91A09") is True
+
+    def test_palette_rejects_unknown_color(self):
+        assert _color_is_allowed("123456") is False
 
 
 # ── TestGenerateLoop (requires torch — test body uses torch.tensor) ──
@@ -221,6 +235,12 @@ class TestGenerateLoop:
         assert "generation_time_ms" in result["metadata"]
         assert "rejections" in result["metadata"]
         assert "rollbacks" in result["metadata"]
+        assert "termination_reason" in result["metadata"]
+        assert "final_stable" in result["metadata"]
+        assert "outlines_enabled" in result["metadata"]
+        assert "palette_validation_enabled" in result["metadata"]
+        assert "hit_max_rejections" in result["metadata"]
+        assert "hit_max_rollbacks" in result["metadata"]
 
     def test_rejections_counted(self):
         from backend.brick.parser import Brick
@@ -232,6 +252,12 @@ class TestGenerateLoop:
         ])
         result = pipeline.generate("test")
         assert result["metadata"]["rejections"] == 8
+
+    def test_max_rejections_sets_termination_reason(self):
+        pipeline = self._make_pipeline([(None, MAX_REJECTIONS, "max_rejections")])
+        result = pipeline.generate("test")
+        assert result["metadata"]["termination_reason"] == "max_rejections"
+        assert result["metadata"]["hit_max_rejections"] is True
 
 
 def test_mock_generate_best_of_n_returns_valid_shape():
@@ -331,6 +357,7 @@ class TestBestOfNRankStrategy:
         # Ranking picks the largest (last call, brick_count=3).
         assert out["brick_count"] == 3
         assert out["metadata"]["picked_index"] == 2
+        assert out["metadata"]["selection_strategy"] == "rank"
 
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch required")
@@ -378,7 +405,8 @@ def test_generate_one_brick_rejects_malformed_line_without_raising():
     grid = VoxelGrid()
     input_ids = torch.tensor([[0, 1, 2, 3]])
 
-    brick, rejections = pipe._generate_one_brick(input_ids, grid)
+    brick, rejections, stop_reason = pipe._generate_one_brick(input_ids, grid)
     assert brick is not None
     assert (brick.h, brick.w, brick.x, brick.y, brick.z) == (2, 4, 0, 0, 0)
     assert rejections == 1  # skipped exactly one malformed line
+    assert stop_reason is None

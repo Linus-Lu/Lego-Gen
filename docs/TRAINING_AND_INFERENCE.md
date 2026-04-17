@@ -184,9 +184,11 @@ weights to a single vectorized cross-entropy call.
 **LoRA config** — `r=32`, `alpha=64`, `dropout=0.05`,
 `target_modules=["q_proj", "v_proj"]` (narrower than Stage 1 because the
 task is structurally simpler), with `use_dora=True`, `use_rslora=True`,
-and `init_lora_weights="pissa"`. PiSSA is safe here because the base is
-loaded in bf16 (no 4-bit quantization on the Stage 2 Brick trainer), so
-the SVD-based adapter initialization can run against the true weights.
+and **without** `init_lora_weights="pissa"`. The Stage 2 trainer keeps
+the base in bf16, so PiSSA would be possible in principle, but the
+shipped configuration leaves it off because PEFT warns on
+`DoRA + PiSSA` and the more stable choice in this repo is
+`DoRA + rsLoRA`.
 
 Checkpoint written to `BRICK_CHECKPOINT_DIR`.
 

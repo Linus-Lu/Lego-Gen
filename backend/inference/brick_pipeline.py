@@ -4,12 +4,13 @@ Also exposes the top-level factory get_brick_pipeline() used by the API routes,
 and a MockBrickPipeline for dev mode (LEGOGEN_DEV=1).
 """
 
+import re
 import threading
 import time
 from pathlib import Path
 from typing import Optional
 
-from backend.brick.constants import BRICK_SHAPES, WORLD_DIM
+from backend.brick.constants import ALLOWED_COLORS, BRICK_SHAPES, WORLD_DIM
 from backend.brick.parser import Brick, parse_brick, parse_brick_sequence, serialize_brick
 from backend.brick.occupancy import VoxelGrid
 from backend.brick.stability import is_stable, find_first_unstable
@@ -26,6 +27,35 @@ def _coord_pattern(max_exclusive: int) -> str:
     return "(?:" + "|".join(str(v) for v in vals) + ")"
 
 
+def _allowed_color_list() -> Optional[list[str]]:
+    """Return the configured LEGO palette, or None when it is unavailable.
+
+    The inference path should stay usable even when ``data/cache/colors.json``
+    has not been prepared yet, so palette loading degrades to a generic hex
+    matcher rather than crashing the server at import time.
+    """
+    try:
+        colors = [color.upper() for color in ALLOWED_COLORS]
+    except OSError:
+        return None
+    return colors or None
+
+
+def _color_pattern() -> str:
+    colors = _allowed_color_list()
+    if not colors:
+        return r"[0-9A-Fa-f]{6}"
+    return "(?:" + "|".join(sorted(colors)) + ")"
+
+
+def _color_is_allowed(color: str) -> bool:
+    normalized = color.upper()
+    colors = _allowed_color_list()
+    if not colors:
+        return bool(re.fullmatch(r"[0-9A-Fa-f]{6}", normalized))
+    return normalized in set(colors)
+
+
 def _build_grammar_pattern() -> str:
     """Regex matching one brick line, restricted to allowed dims and in-bounds coords.
 
@@ -35,7 +65,8 @@ def _build_grammar_pattern() -> str:
     dims = sorted({f"{h}x{w}" for h, w in BRICK_SHAPES}, key=lambda s: (-len(s), s))
     dims_alt = "|".join(dims)
     coord = _coord_pattern(WORLD_DIM)
-    return rf"({dims_alt}) \({coord},{coord},{coord}\) #[0-9A-Fa-f]{{6}}\n"
+    color = _color_pattern()
+    return rf"({dims_alt}) \({coord},{coord},{coord}\) #({color})\n"
 
 
 BRICK_PATTERN = _build_grammar_pattern()
@@ -61,6 +92,20 @@ def _build_logits_processor(tokenizer, pattern: str):
     except ImportError:
         return None
     return RegexLogitsProcessor(pattern, TransformerTokenizer(tokenizer))  # pragma: no cover — only reachable when outlines is installed; CI runs without it.
+
+
+def _normalize_generate_step_result(raw) -> tuple[Optional[Brick], int, Optional[str]]:
+    """Accept legacy 2-tuples from tests and the richer 3-tuple from runtime.
+
+    ``_generate_one_brick`` now returns a stop reason when it yields ``None``,
+    but several unit tests stub the method with ``(brick, rejections)`` tuples.
+    """
+    if isinstance(raw, tuple) and len(raw) == 3:
+        return raw
+    if isinstance(raw, tuple) and len(raw) == 2:
+        brick, rejections = raw
+        return brick, rejections, None
+    raise TypeError(f"Unexpected _generate_one_brick result: {raw!r}")
 
 
 class BrickPipeline:
@@ -139,12 +184,20 @@ class BrickPipeline:
         total_rollbacks = 0
         # Fresh logits processor per call — see _fresh_logits_processor().
         logits_processor = self._fresh_logits_processor()
+        outlines_enabled = logits_processor is not None
+        palette_validation_enabled = _allowed_color_list() is not None
+        termination_reason: Optional[str] = None
+        hit_max_rejections = False
 
         for _ in range(MAX_ROLLBACKS):
             while len(bricks) < MAX_BRICKS:
-                brick, rej = self._generate_one_brick(input_ids, grid, logits_processor)
+                brick, rej, stop_reason = _normalize_generate_step_result(
+                    self._generate_one_brick(input_ids, grid, logits_processor)
+                )
                 total_rejections += rej
                 if brick is None:
+                    termination_reason = stop_reason or "eos"
+                    hit_max_rejections = hit_max_rejections or stop_reason == "max_rejections"
                     break
                 bricks.append(brick)
                 grid.place(brick)
@@ -157,6 +210,8 @@ class BrickPipeline:
                 )
                 if on_progress is not None:
                     on_progress({"type": "brick", "count": len(bricks)})
+            else:
+                termination_reason = "max_bricks"
 
             if is_stable(bricks):
                 break
@@ -182,15 +237,27 @@ class BrickPipeline:
             if on_progress is not None:
                 on_progress({"type": "rollback", "count": total_rollbacks})
 
+        final_stable = is_stable(bricks)
+        if not final_stable and total_rollbacks >= MAX_ROLLBACKS:
+            termination_reason = "max_rollbacks"
+        if termination_reason is None:
+            termination_reason = "stable" if final_stable else "stopped"
+
         return {
             "bricks": "\n".join(serialize_brick(b) for b in bricks),
             "brick_count": len(bricks),
-            "stable": is_stable(bricks),
+            "stable": final_stable,
             "metadata": {
                 "model_version": "qwen35-4b-brick-v1",
                 "generation_time_ms": int((time.time() - t0) * 1000),
                 "rejections": total_rejections,
                 "rollbacks": total_rollbacks,
+                "termination_reason": termination_reason,
+                "final_stable": final_stable,
+                "outlines_enabled": outlines_enabled,
+                "palette_validation_enabled": palette_validation_enabled,
+                "hit_max_rejections": hit_max_rejections,
+                "hit_max_rollbacks": total_rollbacks >= MAX_ROLLBACKS,
             },
         }
 
@@ -232,6 +299,7 @@ class BrickPipeline:
         picked["metadata"]["n"] = n
         picked["metadata"]["picked_index"] = picked_index
         picked["metadata"]["stable_rate"] = sum(1 for c in candidates if c["stable"]) / n
+        picked["metadata"]["selection_strategy"] = strategy
         return picked
 
     def generate_from_image(self, image, on_progress=None) -> dict:  # pragma: no cover — chains real Stage1 + Stage2 pipelines; mock counterpart covers the wiring.
@@ -245,7 +313,7 @@ class BrickPipeline:
 
     def _generate_one_brick(
         self, input_ids, grid: VoxelGrid, logits_processor=None,
-    ) -> tuple[Optional[Brick], int]:  # pragma: no cover — invokes self.model.generate() on a real transformer.
+    ) -> tuple[Optional[Brick], int, Optional[str]]:  # pragma: no cover — invokes self.model.generate() on a real transformer.
         import torch
 
         gen_kwargs = dict(
@@ -266,7 +334,7 @@ class BrickPipeline:
                 out[0, input_ids.shape[1]:], skip_special_tokens=False
             )
             if self.tokenizer.eos_token in text or not text.strip():
-                return None, attempt
+                return None, attempt, "eos"
             first_line = text.strip().split("\n")[0].strip()
             try:
                 brick = parse_brick(first_line)
@@ -277,10 +345,12 @@ class BrickPipeline:
                 # malformed line becomes possible. Treat it as a rejection
                 # rather than propagating a 500.
                 continue
+            if not _color_is_allowed(brick.color):
+                continue
             if not grid.can_place(brick):
                 continue
-            return brick, attempt
-        return None, MAX_REJECTIONS
+            return brick, attempt, None
+        return None, MAX_REJECTIONS, "max_rejections"
 
 
 class MockBrickPipeline:
@@ -302,10 +372,10 @@ class MockBrickPipeline:
         ("2x4", 0, 0, 2, "#FFFFFF"),
         ("2x4", 2, 0, 2, "#FFFFFF"),
         # Roof (z=3, z=4)
-        ("2x4", 0, 0, 3, "#FE8A18"),
-        ("2x4", 2, 0, 3, "#FE8A18"),
-        ("2x2", 1, 1, 4, "#720E0F"),
-        ("2x2", 2, 1, 4, "#720E0F"),
+        ("2x4", 0, 0, 3, "#F2CD37"),
+        ("2x4", 2, 0, 3, "#F2CD37"),
+        ("2x2", 1, 1, 4, "#6D6E5C"),
+        ("2x2", 2, 1, 4, "#6D6E5C"),
     ]
 
     def generate(self, caption: str, on_progress=None) -> dict:
@@ -324,6 +394,12 @@ class MockBrickPipeline:
                 "generation_time_ms": max(1, int((time.time() - t0) * 1000)),
                 "rejections": 0,
                 "rollbacks": 0,
+                "termination_reason": "eos",
+                "final_stable": True,
+                "outlines_enabled": False,
+                "palette_validation_enabled": True,
+                "hit_max_rejections": False,
+                "hit_max_rollbacks": False,
             },
         }
 
@@ -333,6 +409,7 @@ class MockBrickPipeline:
         result["metadata"]["n"] = n
         result["metadata"]["picked_index"] = 0
         result["metadata"]["stable_rate"] = 1.0
+        result["metadata"]["selection_strategy"] = strategy
         return result
 
     def generate_from_image(self, image, on_progress=None) -> dict:

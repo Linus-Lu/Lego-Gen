@@ -4,6 +4,7 @@ import Header from '../components/Header';
 import Footer from '../components/Footer';
 import BrickCoordViewer from '../components/BrickCoordViewer';
 import {
+  downloadLDraw,
   getGalleryBuild,
   parseBrickString,
   bricksToLayers,
@@ -231,6 +232,15 @@ export default function GuidancePage() {
                 </div>
               )}
             </div>
+
+            <button
+              onClick={() => downloadLDraw(build.title || 'legogen-build', build.bricks).catch(e => {
+                setError(e instanceof Error ? e.message : 'Export failed');
+              })}
+              className="btn-ghost w-full"
+            >
+              ▸ export .ldr
+            </button>
 
             <button onClick={() => navigate('/explore')} className="btn-ghost w-full">
               ← back to archive

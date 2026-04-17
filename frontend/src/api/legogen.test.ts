@@ -4,6 +4,7 @@ import {
   parseBrickString,
   bricksToLayers,
   generateBricks,
+  downloadLDraw,
   listGalleryBuilds,
   createGalleryBuild,
   getGalleryBuild,
@@ -114,6 +115,16 @@ describe('generateBricks', () => {
     expect(body.get('n')).toBe('2');
   });
 
+  it('forwards require_stable when provided', async () => {
+    fetchMock.mockResolvedValueOnce(mockFetchResponse({
+      bricks: '', brick_count: 0, stable: true,
+      metadata: { model_version: 'm', generation_time_ms: 0, rejections: 0, rollbacks: 0 },
+    }));
+    await generateBricks(undefined, 'hi', undefined, true);
+    const body = fetchMock.mock.calls[0][1].body as FormData;
+    expect(body.get('require_stable')).toBe('true');
+  });
+
   it('throws with server detail on non-ok response', async () => {
     fetchMock.mockResolvedValueOnce(mockFetchResponse({ detail: 'nope' }, { status: 500 }));
     await expect(generateBricks(undefined, 'hi')).rejects.toThrow('nope');
@@ -210,6 +221,38 @@ describe('Gallery client', () => {
   it('starGalleryBuild throws on HTTP error', async () => {
     fetchMock.mockResolvedValueOnce(new Response('', { status: 500 }));
     await expect(starGalleryBuild('x', 3)).rejects.toThrow('HTTP 500');
+  });
+
+  it('downloadLDraw POSTs JSON and clicks a download link', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('0 FILE demo.ldr\n', {
+      status: 200,
+      headers: { 'Content-Disposition': 'attachment; filename="demo.ldr"' },
+    }));
+    const createObjectURL = vi.fn(() => 'blob:demo');
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL });
+
+    const link = document.createElement('a');
+    const click = vi.fn();
+    link.click = click;
+    const createElementSpy = vi.spyOn(document, 'createElement').mockReturnValue(link);
+
+    await downloadLDraw('Demo', '2x4 (0,0,0) #C91A09');
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toEqual({ title: 'Demo', bricks: '2x4 (0,0,0) #C91A09' });
+    expect(link.download).toBe('demo.ldr');
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:demo');
+
+    createElementSpy.mockRestore();
+  });
+
+  it('downloadLDraw throws on HTTP error', async () => {
+    fetchMock.mockResolvedValueOnce(mockFetchResponse({ detail: 'no export' }, { status: 400 }));
+    await expect(downloadLDraw('Demo', 'x')).rejects.toThrow('no export');
   });
 });
 
@@ -349,6 +392,21 @@ describe('generateBricksStream', () => {
     expect(body.get('image')).toBeInstanceOf(File);
     expect(body.get('prompt')).toBe('hi');
     expect(body.get('n')).toBe('3');
+  });
+
+  it('forwards require_stable for streaming requests', async () => {
+    const result = {
+      bricks: '', brick_count: 0, stable: true,
+      metadata: { model_version: 'm', generation_time_ms: 0, rejections: 0, rollbacks: 0 },
+    };
+    fetchMock.mockResolvedValueOnce(sseResponse([
+      'event: result\ndata: ' + JSON.stringify(result) + '\n\n',
+    ]));
+    await generateBricksStream({
+      prompt: 'hi', requireStable: true, onEvent: () => {},
+    });
+    const body = fetchMock.mock.calls[0][1].body as FormData;
+    expect(body.get('require_stable')).toBe('true');
   });
 
   it('caller AbortSignal aborts the fetch', async () => {

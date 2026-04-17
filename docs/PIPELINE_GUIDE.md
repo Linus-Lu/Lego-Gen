@@ -217,11 +217,12 @@ reaches better final quality (+3–5 pp on small math benchmarks).
 
 **Catch.** PiSSA needs `W` in full precision to SVD. If you quantize
 `W` to NF4 *before* running PiSSA, the SVD is noisy and the
-initialization is wrong. So:
+initialization is wrong. In this repo:
 
-- **Stage 2** (text → bricks) loads the base in **bf16**
-  (`train_brick.py:185`), so PiSSA is safe:
-  `init_lora_weights="pissa"` at `train_brick.py:196`.
+- **Stage 2** (text → bricks) keeps the base in **bf16**
+  (`train_brick.py`) so PiSSA remains *possible in principle*, but the
+  shipped trainer does **not** enable it because PEFT warns on
+  `DoRA + PiSSA` and the combination was unstable in practice.
 - **Stage 1** (image → caption) loads the base in **4-bit NF4**
   (`train_stage1.py:166`) because 9B bf16 would not fit for training.
   PiSSA is intentionally **not** enabled here; only DoRA + rsLoRA
@@ -344,7 +345,7 @@ auto-falls-back to `https://hf-mirror.com`
 20×20×20 grid, and is physically stable.
 
 **Base model.** `Qwen/Qwen3.5-4B`, text-only. Loaded in bf16 (not
-4-bit — this trainer uses PiSSA which needs full precision).
+4-bit — the trainer keeps the base full precision and leaves PiSSA off).
 
 ### 4.1 The dataset: StableText2Brick + deterministic colorization
 
@@ -443,14 +444,15 @@ LoraConfig(
     task_type="CAUSAL_LM",
     use_dora=True,
     use_rslora=True,
-    init_lora_weights="pissa",
 )
 ```
 
-All three modern PEFT upgrades are on. The base is bf16 so PiSSA is
-safe. `target_modules=["q_proj", "v_proj"]` is the narrowest useful
-target set — it is the classical LoRA recipe from the original paper.
-It works here because the task is narrow.
+Two modern PEFT upgrades are on. PiSSA is intentionally left off even
+with a bf16 base because PEFT warns on `DoRA + PiSSA`, and the current
+trainer follows the more stable `DoRA + rsLoRA` combination.
+`target_modules=["q_proj", "v_proj"]` is the narrowest useful target
+set — it is the classical LoRA recipe from the original paper. It works
+here because the task is narrow.
 
 ---
 
@@ -618,16 +620,16 @@ for _ in range(MAX_ROLLBACKS):   # up to 100 times
     if is_stable(bricks):
         break                               # stable — return
 
-    idx = find_first_unstable(bricks)       # binary search
+    idx = find_first_unstable(bricks)       # linear scan
     bricks = bricks[:idx]                   # truncate
     grid.clear(); [grid.place(b) for b in bricks]   # rebuild grid
     # go back to the while loop and try again from idx
 ```
 
-`find_first_unstable` (`stability.py:195`) is a **binary search over
-prefixes**: `O(log n)` LP solves instead of `O(n)`. This relies on the
-monotonicity above — once a prefix is unstable, every longer prefix is
-also unstable.
+`find_first_unstable` (`stability.py:195`) is a **linear scan over
+prefixes**. The scan is deliberate: instability is *not* monotone
+because a later counterweight brick can stabilize an earlier unstable
+prefix, so binary search would be unsound.
 
 Up to 100 full rollbacks are allowed before the generator gives up and
 returns whatever it has. In practice, with a well-trained adapter and
@@ -759,10 +761,11 @@ can't hold the web worker forever.
 What we built is a **two-stage LLM pipeline with runtime guardrails** that
 produces buildable LEGO from text or images.
 
-**Training** is parameter-efficient (LoRA r=32), uses modern PEFT
-upgrades (DoRA + rsLoRA + PiSSA where base precision allows), and
-employs a structure-aware loss that weights tokens by their structural
-importance.
+**Training** is parameter-efficient (LoRA r=32), uses the shipped
+`DoRA + rsLoRA` PEFT stack, and employs a structure-aware loss that
+weights tokens by their structural importance. PiSSA remains discussed
+in the guide as an explored variant, but it is not enabled in the
+current trainers.
 
 **Inference** is three-layered: grammar-constrained decoding makes
 syntax errors impossible, voxel rejection prevents overlaps, and an LP

@@ -19,26 +19,27 @@ const SPECS: { group: string; rows: [string, string][] }[] = [
       ['BASE_MODEL',  'Qwen/Qwen3.5-4B'],
       ['QUANTIZATION', 'NF4 · 4-bit'],
       ['ADAPTER',      'LoRA r=32 α=64 (q_proj, v_proj)'],
-      ['STRATEGY',     'DoRA + rsLoRA + PiSSA'],
-      ['DECODER',      'Outlines RegexLogitsProcessor'],
-      ['GRAMMAR',      'HxW (x,y,z) #RRGGBB · 14 dims'],
+      ['STRATEGY',     'DoRA + rsLoRA'],
+      ['DECODER',      'Outlines / parser fallback'],
+      ['GRAMMAR',      'HxW (x,y,z) #RRGGBB · 14 dims + palette'],
       ['TEMPERATURE',  '0.60 (fixed, no ramp)'],
     ],
   },
   {
     group: 'PHYSICS / STABILITY LP',
     rows: [
-      ['MODEL',        'Force-equilibrium per brick'],
+      ['MODEL',        'Per-stud force equilibrium'],
       ['SOLVER',       'scipy.optimize.linprog · HiGHS'],
       ['VARIABLES',    'per-stud contact forces'],
       ['CONSTRAINTS',  'vertical balance · zero moment'],
-      ['STUD_STRENGTH','1.0 (tension pull-off bound)'],
-      ['ROLLBACK',     'binary search · ≤100 rollbacks'],
+      ['STUD_STRENGTH','1.0 normalized pull-off bound'],
+      ['ROLLBACK',     'linear scan · ≤100 rollbacks'],
     ],
   },
 ];
 
 const CHANGELOG: { tag: string; date: string; note: string }[] = [
+  { tag: 'v0.2.1', date: '2026-04', note: 'Palette-constrained colours, stable-only mode, guardrail trace metadata, and .ldr export.' },
   { tag: 'v0.2.0', date: '2026-04', note: 'Strip legacy JSON path. Pipeline is now strictly two-stage brick-coordinate.' },
   { tag: 'v0.1.2', date: '2026-03', note: 'Grammar-constrained brick decoding (outlines). Parse failures now impossible.' },
   { tag: 'v0.1.1', date: '2026-03', note: 'Force-equilibrium LP replaces connectivity-graph stability.' },
@@ -77,8 +78,9 @@ export default function About() {
               Every brick the model emits is checked against a voxel occupancy
               grid, every completed structure is verified with a per-stud
               force-equilibrium linear program, and any unstable prefix is
-              rolled back mid-generation. The result is that the model cannot,
-              by construction, return geometry that would topple when built.
+              rolled back mid-generation. The API reports the final stability
+              result explicitly, and stable-only mode can reject any output
+              that still ends unstable after the rollback budget is exhausted.
             </p>
           </div>
           <aside className="md:col-span-4 border border-[var(--color-line)] bg-[var(--color-ink-2)] bp-frame-4 relative">
@@ -92,6 +94,8 @@ export default function About() {
                 ['PARAMS.TRAIN',  '~1% via LoRA'],
                 ['OUTPUT',        'HxW (x,y,z) #RRGGBB'],
                 ['ALLOWED_DIMS',  '14'],
+                ['EXPORT',        '.ldr'],
+                ['LICENSE',       'Apache-2.0'],
                 ['MAX_BRICKS',    '500'],
                 ['MAX_ROLLBACKS', '100'],
               ].map(([k, v]) => (

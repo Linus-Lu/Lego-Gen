@@ -1,6 +1,6 @@
 # LEGOGen
 
-Two-stage AI pipeline that turns a photo or text prompt into a LEGO build. Grammar-constrained brick generation, per-stud physics validation, a 3D viewer, and a gallery of saved builds.
+Two-stage AI pipeline that turns a photo or text prompt into a LEGO build. Grammar-constrained brick generation, palette-aware colour validation, per-stud physics validation, `.ldr` export, an approximate 3D viewer, and a gallery of saved builds.
 
 ## Architecture
 
@@ -29,16 +29,19 @@ Two-stage AI pipeline that turns a photo or text prompt into a LEGO build. Gramm
       React + Three.js 3D viewer + Gallery
 ```
 
-Stage 1 can be skipped — a text prompt goes straight to Stage 2. Stage 2 emits bricks one at a time; each is voxel-checked, and a rolling force-equilibrium LP verifies stability. Unstable prefixes are truncated and resumed.
+Stage 1 can be skipped — a text prompt goes straight to Stage 2. Stage 2 emits bricks one at a time; each is voxel-checked, and a rolling force-equilibrium LP verifies stability. Unstable prefixes are truncated and resumed. If rollback budget is exhausted, the response still reports `stable=false`; clients can set `require_stable=1` to reject those outputs.
 
 ## Features
 
 - **Image-to-Build** — Stage 1 captions a photo, Stage 2 emits buildable bricks
 - **Text-to-Build** — prompt goes straight into the Stage 2 brick head
-- **Grammar-constrained decoding** — the only 14 LEGO dims + hex-color format can be emitted
-- **Physics-validated output** — every placement is checked for collision; every structure passes a per-stud LP before returning
+- **Grammar-constrained decoding** — when `outlines` is available, the decoder is restricted to the 14 legal dimensions plus the configured LEGO colour palette; if not, parsing falls back to rejection
+- **Palette-constrained colours** — generated bricks are validated against `data/cache/colors.json`, not arbitrary `#RRGGBB` values
+- **Physics-validated output** — every placement is checked for collision, every completed structure is LP-checked, and `stable` / termination metadata are returned explicitly
+- **Stable-only mode** — `require_stable` on both generation endpoints rejects final unstable outputs instead of returning them
 - **Streaming UI** — the SSE endpoint pushes `progress / brick / rollback / result` events in real time; the frontend visualises brick count and rollback events as they happen
 - **Layer walkthrough** — 3D viewer with past/current/future brick opacity tiers and a keyboard-controlled layer stepper
+- **LDraw export** — generated builds can be downloaded as `.ldr` files and opened in LDraw-compatible tools
 - **Gallery** — save, star, and revisit past builds; shareable deep links (`/guide/:buildId`)
 - **Dev mode** — `LEGOGEN_DEV=1` uses `MockBrickPipeline` so the frontend can be built without a GPU
 
@@ -53,7 +56,7 @@ backend/
     stage1_pipeline.py   Qwen3.5-9B + Stage 1 LoRA (image → caption)
     brick_pipeline.py    Qwen3.5-4B + brick LoRA + factories + MockBrickPipeline
   brick/
-    constants.py, decoder.py, occupancy.py, parser.py, stability.py
+    constants.py, decoder.py, ldraw.py, occupancy.py, parser.py, stability.py
   data_pipeline/
     dataset.py                 Image transforms (shared with Stage 1 dataset)
     dataset_stage1.py          Image→caption dataset + collator
@@ -148,12 +151,13 @@ python -m backend.training.train_brick
 | Param | Value |
 |-------|-------|
 | Base | Qwen3.5-4B |
-| LoRA r / α | 32 / 64 (DoRA + rsLoRA + PiSSA; q_proj/v_proj) |
+| LoRA r / α | 32 / 64 (DoRA + rsLoRA; q_proj/v_proj) |
 | LR | 1e-3 |
 | Batch / accum | 1 / 16 (effective 16) |
 | Max seq length | 4096 |
 | Epochs | 3 |
-| Extras | Structure-aware loss weighting, curriculum ordering, chunked cross-entropy |
+| Quantization | bf16 base during training; Stage 2 inference can load 4-bit NF4 |
+| Extras | Structure-aware loss weighting, chunked cross-entropy; curriculum helper exists but is not enabled by default under HF Trainer shuffling |
 
 Full pipeline: `bash scripts/train_full_pipeline.sh`.
 
@@ -161,8 +165,9 @@ Full pipeline: `bash scripts/train_full_pipeline.sh`.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/api/generate-bricks` | Image or text → `{bricks, caption?, brick_count, stable, metadata}` |
-| POST | `/api/generate-stream` | SSE — `progress / brick / rollback / result / error` events |
+| POST | `/api/generate-bricks` | Image or text → `{bricks, caption?, brick_count, stable, metadata}` (`require_stable` optional) |
+| POST | `/api/generate-stream` | SSE — `progress / brick / rollback / result / error` events (`require_stable` optional) |
+| POST | `/api/export-ldr` | Brick text → downloadable `.ldr` attachment |
 | GET  | `/api/gallery` | List saved builds (sort: newest / bricks / stars; q: title+caption search) |
 | POST | `/api/gallery` | Save a build (`title, caption, bricks, brick_count, stable`) |
 | GET  | `/api/gallery/{id}` | Fetch a saved build |
@@ -175,7 +180,11 @@ Full pipeline: `bash scripts/train_full_pipeline.sh`.
 |-------|-------|
 | Frontend | React 19, TypeScript, Vite, Tailwind CSS v4, Three.js, React-Three-Fiber, React Router |
 | Backend | FastAPI, Python 3.11, asyncio, aiosqlite |
-| Models | Qwen3.5-9B (Stage 1), Qwen3.5-4B (Stage 2), QLoRA (DoRA + rsLoRA ± PiSSA), BitsAndBytes |
-| Decoding | Outlines regex-constrained logits processor |
+| Models | Qwen3.5-9B (Stage 1), Qwen3.5-4B (Stage 2), LoRA + DoRA + rsLoRA, BitsAndBytes |
+| Decoding | Outlines regex-constrained logits processor when installed; parser-based fallback otherwise |
 | Physics | SciPy HiGHS linear-program solver |
 | Training | HuggingFace Transformers + Trainer / TRL SFTTrainer, PEFT, W&B |
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

@@ -8,6 +8,7 @@ import BrickCoordViewer from '../components/BrickCoordViewer';
 import {
   generateBricksStream,
   createGalleryBuild,
+  downloadLDraw,
   parseBrickString,
   bricksToLayers,
 } from '../api/legogen';
@@ -18,6 +19,7 @@ type Stage = 'idle' | 'stage1' | 'stage2' | 'done' | 'error';
 export default function BuildSession() {
   const [file, setFile] = useState<File | null>(null);
   const [prompt, setPrompt] = useState('');
+  const [requireStable, setRequireStable] = useState(true);
   const [stage, setStage] = useState<Stage>('idle');
   const [caption, setCaption] = useState<string>('');
   const [brickCount, setBrickCount] = useState(0);
@@ -64,6 +66,7 @@ export default function BuildSession() {
       const res = await generateBricksStream({
         image: file ?? undefined,
         prompt: prompt.trim() || undefined,
+        requireStable,
         signal: controller.signal,
         onEvent: (evt: StreamEvent) => {
           if (evt.type === 'progress') {
@@ -92,7 +95,7 @@ export default function BuildSession() {
       setError(e?.message ?? 'Generation failed');
       setStage('error');
     }
-  }, [file, prompt, stage, reset]);
+  }, [file, prompt, requireStable, stage, reset]);
 
   const save = useCallback(async () => {
     if (!result || !title.trim()) return;
@@ -165,6 +168,29 @@ export default function BuildSession() {
               )}
             </div>
 
+            <label
+              className="flex items-center justify-between border border-[var(--color-line)] bg-[var(--color-ink-2)] px-4 py-3 cursor-pointer"
+              onClick={() => setRequireStable(v => !v)}
+            >
+              <div>
+                <p className="tick mb-1">STABLE_ONLY</p>
+                <p className="mono text-[11px] text-[var(--color-mute)]">
+                  Return an error instead of an unstable final structure.
+                </p>
+              </div>
+              <span
+                className={`w-10 h-5 border border-[var(--color-line-2)] flex items-center transition-colors ${
+                  requireStable ? 'bg-[var(--color-acid)]/20 border-[var(--color-acid)]' : ''
+                }`}
+              >
+                <span
+                  className={`w-3 h-3 transition-transform mx-1 ${
+                    requireStable ? 'bg-[var(--color-acid)] translate-x-5' : 'bg-[var(--color-mute)]'
+                  }`}
+                />
+              </span>
+            </label>
+
             <ProgressIndicator
               stage={stage}
               caption={caption}
@@ -172,6 +198,30 @@ export default function BuildSession() {
               rollbacks={rollbacks}
               error={error}
             />
+
+            {hasResult && (
+              <div className="border border-[var(--color-line)] bg-[var(--color-ink-2)]">
+                <div className="px-4 py-2 border-b border-[var(--color-line)] flex items-center justify-between">
+                  <span className="label-accent">TRACE</span>
+                  <span className="tick">runtime guardrails</span>
+                </div>
+                <div className="grid sm:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-[var(--color-line)]">
+                  <TraceCell label="STOP" value={formatTerminationReason(result!.metadata.termination_reason)} />
+                  <TraceCell label="GRAMMAR" value={result!.metadata.outlines_enabled ? 'ON' : 'OFF'} />
+                  <TraceCell label="PALETTE" value={result!.metadata.palette_validation_enabled ? 'ON' : 'OFF'} />
+                  <TraceCell
+                    label="LIMITS"
+                    value={
+                      result!.metadata.hit_max_rollbacks
+                        ? 'ROLLBACK'
+                        : result!.metadata.hit_max_rejections
+                          ? 'RETRY'
+                          : 'CLEAR'
+                    }
+                  />
+                </div>
+              </div>
+            )}
 
             {/* Save panel appears on done */}
             {hasResult && (
@@ -198,6 +248,15 @@ export default function BuildSession() {
                     className={saved ? 'btn-ghost w-full' : 'btn-primary w-full'}
                   >
                     {saving ? '▸ saving…' : saved ? '✓ saved to archive' : '▸ save to archive'}
+                  </button>
+                  <button
+                    onClick={() => downloadLDraw(title.trim() || 'legogen-build', result!.bricks).catch(e => {
+                      setError(e instanceof Error ? e.message : 'Export failed');
+                      setStage('error');
+                    })}
+                    className="btn-ghost w-full"
+                  >
+                    ▸ export .ldr
                   </button>
                 </div>
               </div>
@@ -308,4 +367,20 @@ function StatusDot({ running, errored, done }: { running: boolean; errored: bool
       style={{ background: color }}
     />
   );
+}
+
+function TraceCell({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="px-4 py-3">
+      <p className="tick mb-1">{label}</p>
+      <p className="mono text-[12px] tracking-[0.16em] uppercase text-[var(--color-fg-strong)]">
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function formatTerminationReason(reason?: string): string {
+  const value = reason ?? 'unknown';
+  return value.replaceAll('_', ' ');
 }

@@ -7,9 +7,12 @@ import threading
 from queue import SimpleQueue, Empty
 
 from fastapi import APIRouter, File, Form, UploadFile, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from PIL import Image
+from pydantic import BaseModel, Field
 
+from backend.brick.ldraw import export_ldr
+from backend.brick.parser import parse_brick_sequence
 from backend.inference.brick_pipeline import get_brick_pipeline
 from backend.config import INFERENCE_TIMEOUT_SECONDS, LEGOGEN_DEV
 
@@ -21,6 +24,7 @@ router = APIRouter(prefix="/api", tags=["generate"])
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 # Prompt: any real text input is well under a few hundred chars; cap at 2000.
 MAX_PROMPT_CHARS = 2000
+MAX_EXPORT_BRICKS_CHARS = 200_000
 
 
 def _decode_image(contents: bytes) -> Image.Image:
@@ -75,6 +79,7 @@ async def generate_bricks(
     image: UploadFile = File(default=None),
     prompt: str = Form(default=""),
     n: int = Form(default=1, ge=1, le=16),
+    require_stable: bool = Form(default=False),
 ):
     """Image or text → brick-coordinate model. Non-streaming.
 
@@ -117,10 +122,16 @@ async def generate_bricks(
             call = lambda: pipeline.generate(stripped_prompt)
 
     try:
-        return await asyncio.wait_for(
+        result = await asyncio.wait_for(
             loop.run_in_executor(None, call),
             timeout=INFERENCE_TIMEOUT_SECONDS,
         )
+        if require_stable and not result.get("stable", False):
+            raise HTTPException(
+                status_code=422,
+                detail="Generation finished without a stable structure; try again or relax the stable-only requirement",
+            )
+        return result
     except asyncio.TimeoutError:
         # Signal the worker thread to stop at its next cooperative
         # checkpoint. The thread will still finish its current sample, but
@@ -182,11 +193,17 @@ def _sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+class ExportLDrawRequest(BaseModel):
+    title: str = Field(default="LEGOGen Build", max_length=200)
+    bricks: str = Field(min_length=1, max_length=MAX_EXPORT_BRICKS_CHARS)
+
+
 @router.post("/generate-stream")
 async def generate_stream(
     image: UploadFile = File(default=None),
     prompt: str = Form(default=""),
     n: int = Form(default=1, ge=1, le=16),
+    require_stable: bool = Form(default=False),
 ):
     """SSE streaming endpoint for brick generation.
 
@@ -294,6 +311,12 @@ async def generate_stream(
                 elif evt["type"] == "rollback":
                     yield _sse_event("rollback", {"count": evt["count"]})
 
+            if require_stable and not result.get("stable", False):
+                yield _sse_event("error", {
+                    "detail": "Generation finished without a stable structure; try again or relax the stable-only requirement",
+                })
+                return
+
             yield _sse_event("result", result)
         except asyncio.CancelledError:  # pragma: no cover — client-disconnect path; not reachable from synchronous TestClient.
             # Client disconnected. Mark the worker for cooperative shutdown;
@@ -310,4 +333,25 @@ async def generate_stream(
         event_generator(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/export-ldr")
+async def export_ldraw(req: ExportLDrawRequest):
+    try:
+        bricks = parse_brick_sequence(req.bricks)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="No valid bricks to export") from exc
+    if not bricks:
+        raise HTTPException(status_code=400, detail="No valid bricks to export")
+
+    text = export_ldr(bricks, title=req.title)
+    filename = req.title.strip() or "legogen-build"
+    safe = "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in filename).strip("-") or "legogen-build"
+    return Response(
+        content=text,
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe}.ldr"',
+        },
     )

@@ -70,6 +70,8 @@ class TestGenerateBricks:
         data = resp.json()
         assert data["brick_count"] > 0
         assert isinstance(data["bricks"], str)
+        assert "termination_reason" in data["metadata"]
+        assert "outlines_enabled" in data["metadata"]
 
     def test_no_input_returns_400(self, client):
         resp = client.post("/api/generate-bricks", data={"prompt": ""})
@@ -103,6 +105,38 @@ class TestGenerateBricks:
         resp = client.post("/api/generate-bricks", data={"prompt": "test", "n": "0"})
         assert resp.status_code == 422
 
+    def test_require_stable_accepts_stable_result(self, client):
+        resp = client.post(
+            "/api/generate-bricks",
+            data={"prompt": "a red house", "require_stable": "true"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["stable"] is True
+
+    def test_require_stable_rejects_unstable_result(self, monkeypatch, client):
+        import backend.inference.brick_pipeline as bp
+
+        def unstable_generate(self, caption, on_progress=None):
+            return {
+                "bricks": "2x4 (0,0,0) #C91A09",
+                "brick_count": 1,
+                "stable": False,
+                "metadata": {
+                    "model_version": "mock-brick-v1",
+                    "generation_time_ms": 1,
+                    "rejections": 0,
+                    "rollbacks": 0,
+                },
+            }
+
+        monkeypatch.setattr(bp.MockBrickPipeline, "generate", unstable_generate)
+        resp = client.post(
+            "/api/generate-bricks",
+            data={"prompt": "unstable", "require_stable": "true"},
+        )
+        assert resp.status_code == 422
+        assert "stable" in resp.json()["detail"].lower()
+
 
 class TestGenerateStream:
     def test_image_stream_emits_events(self, client):
@@ -123,6 +157,64 @@ class TestGenerateStream:
         body = resp.text
         assert "event: progress" in body
         assert "event: result" in body
+
+    def test_stream_require_stable_emits_result_when_stable(self, client):
+        resp = client.post(
+            "/api/generate-stream",
+            data={"prompt": "a small robot", "require_stable": "true"},
+        )
+        assert resp.status_code == 200
+        assert "event: result" in resp.text
+
+    def test_stream_require_stable_emits_error_when_unstable(self, monkeypatch, client):
+        import backend.inference.brick_pipeline as bp
+
+        def unstable_generate(self, caption, on_progress=None):
+            return {
+                "bricks": "2x4 (0,0,0) #C91A09",
+                "brick_count": 1,
+                "stable": False,
+                "metadata": {
+                    "model_version": "mock-brick-v1",
+                    "generation_time_ms": 1,
+                    "rejections": 0,
+                    "rollbacks": 0,
+                },
+            }
+
+        monkeypatch.setattr(bp.MockBrickPipeline, "generate", unstable_generate)
+        resp = client.post(
+            "/api/generate-stream",
+            data={"prompt": "unstable", "require_stable": "true"},
+        )
+        assert resp.status_code == 200
+        assert "event: error" in resp.text
+        assert "stable-only requirement" in resp.text
+        assert "event: result" not in resp.text
+
+
+class TestExportLDraw:
+    def test_export_ldr_returns_attachment(self, client):
+        resp = client.post(
+            "/api/export-ldr",
+            json={
+                "title": "My Build",
+                "bricks": "2x4 (0,0,0) #C91A09\n1x2 (0,4,0) #0055BF",
+            },
+        )
+        assert resp.status_code == 200
+        assert "attachment" in resp.headers["content-disposition"]
+        assert "My-Build.ldr" in resp.headers["content-disposition"]
+        assert "0 FILE My-Build.ldr" in resp.text
+        assert "3001.dat" in resp.text
+
+    def test_export_ldr_rejects_empty_or_invalid_payload(self, client):
+        resp = client.post("/api/export-ldr", json={"title": "Empty", "bricks": "   "})
+        assert resp.status_code == 400
+
+        resp = client.post("/api/export-ldr", json={"title": "Bad", "bricks": "garbage"})
+        assert resp.status_code == 400
+        assert "valid bricks" in resp.json()["detail"].lower()
 
 
 class TestGallery:

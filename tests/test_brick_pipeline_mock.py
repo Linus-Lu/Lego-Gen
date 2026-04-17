@@ -21,6 +21,8 @@ def test_mock_generate_emits_expected_bricks():
     assert out["brick_count"] == 12
     assert out["stable"] is True
     assert out["metadata"]["model_version"] == "mock-brick-v1"
+    assert out["metadata"]["termination_reason"] == "eos"
+    assert out["metadata"]["final_stable"] is True
     # One progress event per brick.
     assert [e["count"] for e in events] == list(range(1, 13))
 
@@ -38,6 +40,7 @@ def test_mock_generate_best_of_n_stamps_metadata():
     assert out["metadata"]["n"] == 5
     assert out["metadata"]["picked_index"] == 0
     assert out["metadata"]["stable_rate"] == 1.0
+    assert out["metadata"]["selection_strategy"] == "rank"
 
 
 def test_mock_generate_from_image_returns_caption():
