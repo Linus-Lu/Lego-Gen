@@ -326,6 +326,7 @@ class TestBestOfNRankStrategy:
         assert out["metadata"]["picked_index"] == 2
 
 
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch required")
 def test_generate_one_brick_rejects_malformed_line_without_raising():
     """Regression for bug_024: when the grammar logits processor is absent
     (outlines missing) the model can emit non-brick text. The rejection
