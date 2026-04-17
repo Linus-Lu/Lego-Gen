@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
     print("Shutting down LEGOGen.")
 
 
-def _preload_models():  # pragma: no cover
+def _preload_models():  # pragma: no cover — calls GPU model factories; no GPU in CI.
     """Load the brick + Stage 1 pipelines in a thread so startup isn't blocked."""
     from backend.inference.brick_pipeline import get_brick_pipeline, _get_stage1_pipeline
     get_brick_pipeline()
