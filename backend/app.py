@@ -16,7 +16,8 @@ from backend.storage import gallery_db
 async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle. Preload models so first request isn't slow."""
     await gallery_db.init_db()
-    if os.environ.get("LEGOGEN_DEV", "1") != "1":
+    if os.environ.get("LEGOGEN_DEV", "1") != "1":  # pragma: no cover
+        # Real model preload — can't run in CI (no GPU, no weights).
         print("LEGOGen API starting — preloading models...")
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _preload_models)
@@ -27,7 +28,7 @@ async def lifespan(app: FastAPI):
     print("Shutting down LEGOGen.")
 
 
-def _preload_models():
+def _preload_models():  # pragma: no cover
     """Load the brick + Stage 1 pipelines in a thread so startup isn't blocked."""
     from backend.inference.brick_pipeline import get_brick_pipeline, _get_stage1_pipeline
     get_brick_pipeline()

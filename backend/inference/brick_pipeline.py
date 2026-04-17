@@ -72,7 +72,7 @@ class BrickPipeline:
       3. Physics rollback — LP-based stability check via backend/brick/stability.py.
     """
 
-    def __init__(self, device: str = "cuda") -> None:
+    def __init__(self, device: str = "cuda") -> None:  # pragma: no cover
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
         from peft import PeftModel
@@ -101,7 +101,7 @@ class BrickPipeline:
         )
         self.model.eval()
 
-    def _fresh_logits_processor(self):
+    def _fresh_logits_processor(self):  # pragma: no cover
         """Build a new RegexLogitsProcessor, or None if outlines is absent.
 
         We rebuild per ``generate()`` call because the processor's internal
@@ -110,7 +110,7 @@ class BrickPipeline:
         """
         return _build_logits_processor(self.tokenizer, BRICK_PATTERN)
 
-    def generate(self, caption: str, on_progress=None) -> dict:
+    def generate(self, caption: str, on_progress=None) -> dict:  # pragma: no cover
         """Generate a brick structure for *caption*.
 
         If ``on_progress`` is provided, it is called with events of the form:
@@ -194,7 +194,7 @@ class BrickPipeline:
             },
         }
 
-    def generate_best_of_n(self, caption: str, n: int = 16, strategy: str = "cluster", on_progress=None) -> dict:
+    def generate_best_of_n(self, caption: str, n: int = 16, strategy: str = "cluster", on_progress=None) -> dict:  # pragma: no cover
         """Run generate() n times and return the chosen sample.
 
         strategy="rank"    -> rank_candidates, return top
@@ -234,7 +234,7 @@ class BrickPipeline:
         picked["metadata"]["stable_rate"] = sum(1 for c in candidates if c["stable"]) / n
         return picked
 
-    def generate_from_image(self, image, on_progress=None) -> dict:
+    def generate_from_image(self, image, on_progress=None) -> dict:  # pragma: no cover
         """Two-stage: image → Stage 1 caption → brick sequence."""
         caption = _get_stage1_pipeline().describe(image)
         if on_progress is not None:
@@ -245,7 +245,7 @@ class BrickPipeline:
 
     def _generate_one_brick(
         self, input_ids, grid: VoxelGrid, logits_processor=None,
-    ) -> tuple[Optional[Brick], int]:
+    ) -> tuple[Optional[Brick], int]:  # pragma: no cover
         import torch
 
         gen_kwargs = dict(
@@ -356,7 +356,10 @@ def get_brick_pipeline():
     if _brick_instance is None:
         with _brick_lock:
             if _brick_instance is None:
-                _brick_instance = MockBrickPipeline() if LEGOGEN_DEV else BrickPipeline()
+                if LEGOGEN_DEV:
+                    _brick_instance = MockBrickPipeline()
+                else:  # pragma: no cover
+                    _brick_instance = BrickPipeline()
     return _brick_instance
 
 
@@ -367,7 +370,7 @@ def _get_stage1_pipeline():
             if _stage1_instance is None:
                 if LEGOGEN_DEV:
                     _stage1_instance = _MockStage1()
-                else:
+                else:  # pragma: no cover
                     from backend.inference.stage1_pipeline import Stage1Pipeline
                     _stage1_instance = Stage1Pipeline()
     return _stage1_instance
