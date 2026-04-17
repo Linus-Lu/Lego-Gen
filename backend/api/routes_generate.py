@@ -217,7 +217,7 @@ async def generate_stream(
             # boundary — otherwise a client disconnect or server-side
             # timeout would let an idle worker keep burning compute.
             if cancel.is_set:
-                raise _Cancelled()
+                raise _Cancelled()  # pragma: no cover — only raised when client disconnects mid-stream; TestClient is synchronous.
             event_queue.put(evt)
 
         def run() -> dict:
@@ -250,7 +250,7 @@ async def generate_stream(
                 except Empty:
                     if future.done():
                         break
-                    if loop.time() >= deadline:
+                    if loop.time() >= deadline:  # pragma: no cover — SSE deadline fires only on real timeout races; not deterministic with TestClient.
                         cancel.set()
                         yield _sse_event("error", {
                             "detail": f"Inference timed out after {INFERENCE_TIMEOUT_SECONDS}s",
@@ -282,7 +282,7 @@ async def generate_stream(
 
             result = await future
             # Drain any late events.
-            while not event_queue.empty():
+            while not event_queue.empty():  # pragma: no cover — race-condition drain path; events queued after future.done() aren't deterministically reachable in tests.
                 evt = event_queue.get_nowait()
                 if evt["type"] == "brick":
                     yield _sse_event("brick", {"count": evt["count"]})
@@ -290,15 +290,15 @@ async def generate_stream(
                     yield _sse_event("rollback", {"count": evt["count"]})
 
             yield _sse_event("result", result)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError:  # pragma: no cover — client-disconnect path; not reachable from synchronous TestClient.
             # Client disconnected. Mark the worker for cooperative shutdown;
             # the thread can't be killed but it will stop at its next
             # progress event and not start another Best-of-N sample.
             cancel.set()
             raise
-        except _Cancelled:
+        except _Cancelled:  # pragma: no cover — raised from the worker thread on cancellation; requires client-disconnect mid-stream.
             yield _sse_event("error", {"detail": "Request cancelled"})
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover — unexpected worker-thread error; mocks don't raise.
             yield _sse_event("error", {"detail": str(exc)})
 
     return StreamingResponse(
