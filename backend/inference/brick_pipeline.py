@@ -57,10 +57,10 @@ def _build_logits_processor(tokenizer, pattern: str):
     """Instantiate an outlines RegexLogitsProcessor, or None if outlines is absent."""
     try:
         from outlines.processors import RegexLogitsProcessor
-        from outlines.models.transformers import TransformerTokenizer
+        from outlines.models.transformers import TransformerTokenizer  # pragma: no cover — only reachable when outlines is installed; CI runs without it.
     except ImportError:
         return None
-    return RegexLogitsProcessor(pattern, TransformerTokenizer(tokenizer))
+    return RegexLogitsProcessor(pattern, TransformerTokenizer(tokenizer))  # pragma: no cover — only reachable when outlines is installed; CI runs without it.
 
 
 class BrickPipeline:
@@ -355,7 +355,7 @@ def get_brick_pipeline():
     global _brick_instance
     if _brick_instance is None:
         with _brick_lock:
-            if _brick_instance is None:
+            if _brick_instance is None:  # pragma: no branch — inner race-resolution branch; unreachable in single-threaded tests.
                 if LEGOGEN_DEV:
                     _brick_instance = MockBrickPipeline()
                 else:  # pragma: no cover — BrickPipeline() needs GPU; LEGOGEN_DEV=1 in CI.
@@ -367,7 +367,7 @@ def _get_stage1_pipeline():
     global _stage1_instance
     if _stage1_instance is None:
         with _stage1_lock:
-            if _stage1_instance is None:
+            if _stage1_instance is None:  # pragma: no branch — inner race-resolution branch; unreachable in single-threaded tests.
                 if LEGOGEN_DEV:
                     _stage1_instance = _MockStage1()
                 else:  # pragma: no cover — Stage1Pipeline() loads Qwen3.5-9B; LEGOGEN_DEV=1 in CI.
