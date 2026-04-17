@@ -130,7 +130,7 @@ def _solve_equilibrium(bricks: list[Brick]) -> bool:
     num_g = len(g_contacts)
     num_vars = num_bb + num_g
 
-    if num_vars == 0:
+    if num_vars == 0:  # pragma: no cover — unreachable: n>0 with no contacts implies no z=0 brick, so _is_connected would have returned False above.
         return False
 
     # Index bricks -> contacts that touch them, to avoid O(n*num_contacts) scans.
@@ -209,4 +209,4 @@ def find_first_unstable(bricks: list[Brick]) -> int:
     for i in range(n):
         if not is_stable(bricks[: i + 1]):
             return i
-    return -1  # Unreachable: is_stable(bricks) returned False above.
+    return -1  # pragma: no cover — unreachable: is_stable(bricks) returned False above, so some prefix must be unstable.
