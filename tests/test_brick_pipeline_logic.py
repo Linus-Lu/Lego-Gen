@@ -150,13 +150,16 @@ class TestGenerateLoop:
 
         call_iter = iter(brick_results)
 
-        def mock_generate_one(input_ids, grid):
+        def mock_generate_one(input_ids, grid, logits_processor=None):
             try:
                 return next(call_iter)
             except StopIteration:
                 return None, 0
 
         pipeline._generate_one_brick = mock_generate_one
+        # _fresh_logits_processor is a real method on the class and tries to
+        # import outlines; returning None matches the absent-outlines path.
+        pipeline._fresh_logits_processor = lambda: None
 
         # Mock tokenizer. encode() behaves differently depending on kwargs:
         #   - return_tensors="pt"  -> 2-D tensor (for the initial prompt)

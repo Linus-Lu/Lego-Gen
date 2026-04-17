@@ -147,10 +147,13 @@ class Stage1Dataset(Dataset):
 
         labels[:prompt_len] = -100
 
-        # Mask padding tokens
-        pad_token_id = self.processor.tokenizer.pad_token_id
-        if pad_token_id is not None:
-            labels[labels == pad_token_id] = -100
+        # Mask padding positions via attention_mask instead of token id.
+        # Qwen tokenizers set ``pad_token_id == eos_token_id``, so masking
+        # by token id would silently mask the terminal EOS inside the
+        # assistant turn and the model would never learn when to stop.
+        attn = inputs.get("attention_mask")
+        if attn is not None:
+            labels[attn == 0] = -100
 
         return labels
 

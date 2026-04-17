@@ -101,24 +101,24 @@ async def get_build(build_id: str) -> Optional[dict]:
 
 
 async def update_star(build_id: str, stars: int) -> Optional[dict]:
-    """Add a star rating using running average."""
+    """Add a star rating using a running average.
+
+    Computed atomically in a single SQL statement — a prior read-modify-write
+    version lost concurrent star submissions because two readers could see
+    the same ``star_count`` before either committed.
+    """
     async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "SELECT stars, star_count FROM builds WHERE id = ?", (build_id,)
-        )
-        row = await cursor.fetchone()
-        if not row:
-            return None
-
-        old_avg = row["stars"]
-        count = row["star_count"]
-        new_avg = (old_avg * count + stars) / (count + 1)
-
-        await db.execute(
-            "UPDATE builds SET stars = ?, star_count = ? WHERE id = ?",
-            (new_avg, count + 1, build_id),
+            """
+            UPDATE builds
+               SET stars = (stars * star_count + ?) / (star_count + 1.0),
+                   star_count = star_count + 1
+             WHERE id = ?
+            """,
+            (stars, build_id),
         )
         await db.commit()
+        if cursor.rowcount == 0:
+            return None
 
     return await get_build(build_id)

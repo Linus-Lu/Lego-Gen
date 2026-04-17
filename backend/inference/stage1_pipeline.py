@@ -7,9 +7,6 @@ for Stage 2 brick-coordinate generation.
 
 from pathlib import Path
 
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-
 from backend.config import (
     STAGE1_MODEL_NAME,
     STAGE1_CHECKPOINT_DIR,
@@ -41,10 +38,13 @@ class Stage1Pipeline:
         )
         from peft import PeftModel
 
+        # Keep these in lockstep with backend/training/train_stage1.py so
+        # the dynamic-resolution ViT tiles images into the same number of
+        # visual tokens at inference as it saw during training.
         self.processor = AutoProcessor.from_pretrained(
             STAGE1_MODEL_NAME,
-            min_pixels=256 * 28 * 28,
-            max_pixels=512 * 28 * 28,
+            min_pixels=128 * 28 * 28,
+            max_pixels=256 * 28 * 28,
         )
 
         bnb_config = BitsAndBytesConfig(

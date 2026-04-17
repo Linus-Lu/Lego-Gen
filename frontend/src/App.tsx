@@ -1,22 +1,26 @@
+import { lazy, Suspense } from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import Home from './pages/Home';
-import BuildSession from './pages/BuildSession';
-import GuidancePage from './pages/GuidancePage';
-import ExplorePage from './pages/ExplorePage';
-import About from './pages/About';
 import ErrorBoundary from './components/ErrorBoundary';
+
+const BuildSession = lazy(() => import('./pages/BuildSession'));
+const GuidancePage = lazy(() => import('./pages/GuidancePage'));
+const ExplorePage = lazy(() => import('./pages/ExplorePage'));
+const About = lazy(() => import('./pages/About'));
 
 function App() {
   return (
     <ErrorBoundary>
       <Router>
-        <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/build" element={<BuildSession />} />
-          <Route path="/guide/:buildId" element={<GuidancePage />} />
-          <Route path="/explore" element={<ExplorePage />} />
-          <Route path="/about" element={<About />} />
-        </Routes>
+        <Suspense fallback={null}>
+          <Routes>
+            <Route path="/" element={<Home />} />
+            <Route path="/build" element={<BuildSession />} />
+            <Route path="/guide/:buildId" element={<GuidancePage />} />
+            <Route path="/explore" element={<ExplorePage />} />
+            <Route path="/about" element={<About />} />
+          </Routes>
+        </Suspense>
       </Router>
     </ErrorBoundary>
   );

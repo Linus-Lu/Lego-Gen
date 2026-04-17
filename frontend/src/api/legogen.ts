@@ -95,10 +95,12 @@ export function bricksToLayers(bricks: BrickCoord[]): { steps: LayerStep[]; zLev
 export async function generateBricks(
   image?: File,
   prompt?: string,
+  n?: number,
 ): Promise<BrickResponse> {
   const form = new FormData();
   if (image) form.append('image', image);
   if (prompt) form.append('prompt', prompt);
+  if (n !== undefined) form.append('n', String(n));
 
   const res = await fetch(`${API_BASE}/api/generate-bricks`, {
     method: 'POST',
@@ -116,70 +118,95 @@ export async function generateBricks(
 export type StreamEvent =
   | { type: 'progress'; stage: 'stage1' | 'stage2'; message: string; caption?: string }
   | { type: 'brick'; count: number }
-  | { type: 'rollback'; count: number };
+  | { type: 'rollback'; count: number }
+  | { type: 'sample'; index: number; of: number; stable: boolean };
+
+/** Wall-clock cap on the whole SSE stream (ms). Matches backend timeout
+ * plus a small buffer for network overhead, so we bail out if the server
+ * stops emitting events mid-stream. */
+const DEFAULT_STREAM_TIMEOUT_MS = 150_000;
 
 export async function generateBricksStream(
   opts: {
     image?: File;
     prompt?: string;
+    n?: number;
     onEvent: (evt: StreamEvent) => void;
     signal?: AbortSignal;
+    timeoutMs?: number;
   },
 ): Promise<BrickResponse> {
   const form = new FormData();
   if (opts.image) form.append('image', opts.image);
   if (opts.prompt) form.append('prompt', opts.prompt);
+  if (opts.n !== undefined) form.append('n', String(opts.n));
 
-  const res = await fetch(`${API_BASE}/api/generate-stream`, {
-    method: 'POST',
-    body: form,
-    signal: opts.signal,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Request failed' }));
-    throw new Error(err.detail ?? `HTTP ${res.status}`);
-  }
-  const reader = res.body?.getReader();
-  if (!reader) throw new Error('No response body');
+  // Combine the caller's abort signal with our own timeout signal so either
+  // one can short-circuit a hung stream. Without this the fetch+reader can
+  // block indefinitely when the backend sends headers and then stalls.
+  const timeoutCtl = new AbortController();
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_STREAM_TIMEOUT_MS;
+  const timeoutId = setTimeout(() => timeoutCtl.abort(), timeoutMs);
+  const onCallerAbort = () => timeoutCtl.abort();
+  opts.signal?.addEventListener('abort', onCallerAbort);
 
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let result: BrickResponse | null = null;
+  try {
+    const res = await fetch(`${API_BASE}/api/generate-stream`, {
+      method: 'POST',
+      body: form,
+      signal: timeoutCtl.signal,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Request failed' }));
+      throw new Error(err.detail ?? `HTTP ${res.status}`);
+    }
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error('No response body');
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const chunks = buffer.split('\n\n');
-    buffer = chunks.pop() ?? '';
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let result: BrickResponse | null = null;
 
-    for (const chunk of chunks) {
-      const lines = chunk.split('\n');
-      let eventType = '';
-      let dataStr = '';
-      for (const line of lines) {
-        if (line.startsWith('event: ')) eventType = line.slice(7).trim();
-        else if (line.startsWith('data: ')) dataStr = line.slice(6);
-      }
-      if (!eventType || !dataStr) continue;
-      let data: any;
-      try { data = JSON.parse(dataStr); } catch { continue; }
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split('\n\n');
+      buffer = chunks.pop() ?? '';
 
-      if (eventType === 'progress') {
-        opts.onEvent({ type: 'progress', stage: data.stage, message: data.message, caption: data.caption });
-      } else if (eventType === 'brick') {
-        opts.onEvent({ type: 'brick', count: data.count });
-      } else if (eventType === 'rollback') {
-        opts.onEvent({ type: 'rollback', count: data.count });
-      } else if (eventType === 'result') {
-        result = data as BrickResponse;
-      } else if (eventType === 'error') {
-        throw new Error(data.detail ?? 'Generation failed');
+      for (const chunk of chunks) {
+        const lines = chunk.split('\n');
+        let eventType = '';
+        let dataStr = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+          else if (line.startsWith('data: ')) dataStr = line.slice(6);
+        }
+        if (!eventType || !dataStr) continue;
+        let data: any;
+        try { data = JSON.parse(dataStr); } catch { continue; }
+
+        if (eventType === 'progress') {
+          opts.onEvent({ type: 'progress', stage: data.stage, message: data.message, caption: data.caption });
+        } else if (eventType === 'brick') {
+          opts.onEvent({ type: 'brick', count: data.count });
+        } else if (eventType === 'rollback') {
+          opts.onEvent({ type: 'rollback', count: data.count });
+        } else if (eventType === 'sample') {
+          opts.onEvent({ type: 'sample', index: data.index, of: data.of, stable: data.stable });
+        } else if (eventType === 'result') {
+          result = data as BrickResponse;
+        } else if (eventType === 'error') {
+          throw new Error(data.detail ?? 'Generation failed');
+        }
       }
     }
+    if (!result) throw new Error('Stream ended without result');
+    return result;
+  } finally {
+    clearTimeout(timeoutId);
+    opts.signal?.removeEventListener('abort', onCallerAbort);
   }
-  if (!result) throw new Error('Stream ended without result');
-  return result;
 }
 
 // ── Gallery API ────────────────────────────────────────────────────

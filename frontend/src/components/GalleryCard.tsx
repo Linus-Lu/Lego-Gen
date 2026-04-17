@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { starGalleryBuild, parseBrickString } from '../api/legogen';
 import type { GalleryBuild } from '../api/legogen';
@@ -98,7 +98,7 @@ export default function GalleryCard({ build, onStarUpdate, index = 0 }: GalleryC
   const navigate = useNavigate();
   const [hover, setHover] = useState(0);
   const stable = typeof build.stable === 'boolean' ? build.stable : !!build.stable;
-  const bricks = parseBrickString(build.bricks);
+  const bricks = useMemo(() => parseBrickString(build.bricks), [build.bricks]);
 
   const handleStar = async (stars: number) => {
     try {
