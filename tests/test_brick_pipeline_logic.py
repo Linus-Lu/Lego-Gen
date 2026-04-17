@@ -324,3 +324,53 @@ class TestBestOfNRankStrategy:
         # Ranking picks the largest (last call, brick_count=3).
         assert out["brick_count"] == 3
         assert out["metadata"]["picked_index"] == 2
+
+
+def test_generate_one_brick_rejects_malformed_line_without_raising():
+    """Regression for bug_024: when the grammar logits processor is absent
+    (outlines missing) the model can emit non-brick text. The rejection
+    loop must treat a parse failure the same as a voxel collision rather
+    than propagating ValueError out of the pipeline.
+    """
+    import torch
+    from backend.inference.brick_pipeline import BrickPipeline
+    from backend.brick.occupancy import VoxelGrid
+
+    pipe = BrickPipeline.__new__(BrickPipeline)
+    pipe.device = "cpu"
+    pipe.logits_processor = None  # simulates outlines missing
+
+    decode_outputs = [
+        "this is not a brick line\n",  # raises ValueError
+        "2x4 (0,0,0) #C91A09\n",       # valid
+    ]
+
+    class StubTok:
+        pad_token_id = 0
+        eos_token_id = 1
+        eos_token = "<|endoftext|>"
+
+        def __init__(self):
+            self._i = 0
+
+        def decode(self, tokens, skip_special_tokens=False):
+            out = decode_outputs[self._i]
+            self._i = min(self._i + 1, len(decode_outputs) - 1)
+            return out
+
+    class StubModel:
+        def generate(self, input_ids, **kwargs):
+            return torch.cat(
+                [input_ids, torch.tensor([[42]], device=input_ids.device)], dim=1
+            )
+
+    pipe.tokenizer = StubTok()
+    pipe.model = StubModel()
+
+    grid = VoxelGrid()
+    input_ids = torch.tensor([[0, 1, 2, 3]])
+
+    brick, rejections = pipe._generate_one_brick(input_ids, grid)
+    assert brick is not None
+    assert (brick.h, brick.w, brick.x, brick.y, brick.z) == (2, 4, 0, 0, 0)
+    assert rejections == 1  # skipped exactly one malformed line

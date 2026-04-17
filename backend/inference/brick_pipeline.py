@@ -268,13 +268,14 @@ class BrickPipeline:
             if self.tokenizer.eos_token in text or not text.strip():
                 return None, attempt
             first_line = text.strip().split("\n")[0].strip()
-            # Grammar constraints make parse failures impossible when the
-            # logits processor is active. When outlines is absent the model
-            # can emit malformed text; treat that as a rejection rather than
-            # crashing the whole generation.
             try:
                 brick = parse_brick(first_line)
             except ValueError:
+                # Should not occur under the outlines grammar processor, but
+                # the optional-import fallback at _build_logits_processor
+                # returns None when outlines is missing, and at that point a
+                # malformed line becomes possible. Treat it as a rejection
+                # rather than propagating a 500.
                 continue
             if not grid.can_place(brick):
                 continue

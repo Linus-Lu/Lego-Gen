@@ -63,7 +63,10 @@ async def list_builds(
             f"SELECT * FROM builds {where} ORDER BY {order}", params
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        results = [dict(row) for row in rows]
+        for r in results:
+            r["stable"] = bool(r["stable"])
+        return results
 
 
 async def create_build(
@@ -101,20 +104,19 @@ async def get_build(build_id: str) -> Optional[dict]:
 
 
 async def update_star(build_id: str, stars: int) -> Optional[dict]:
-    """Add a star rating using a running average.
+    """Add a star rating using running average.
 
-    Computed atomically in a single SQL statement — a prior read-modify-write
-    version lost concurrent star submissions because two readers could see
-    the same ``star_count`` before either committed.
+    Atomic read-modify-write via a single UPDATE — the expression evaluates
+    against the row's current values under SQLite's row-level write lock,
+    so concurrent PATCH calls serialize correctly instead of racing on a
+    stale SELECT.
     """
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            """
-            UPDATE builds
-               SET stars = (stars * star_count + ?) / (star_count + 1.0),
-                   star_count = star_count + 1
-             WHERE id = ?
-            """,
+            """UPDATE builds
+                  SET stars = (stars * star_count + ?) / (star_count + 1.0),
+                      star_count = star_count + 1
+                WHERE id = ?""",
             (stars, build_id),
         )
         await db.commit()
