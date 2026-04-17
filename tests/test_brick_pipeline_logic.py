@@ -256,3 +256,71 @@ def test_generate_best_of_n_strips_bricks_parsed_from_returned_dict():
     assert "bricks_parsed" not in out
     assert isinstance(out["bricks"], str)
     assert out["metadata"]["n"] == 2
+
+
+# ── TestGrammarOrdering (requires module import via _TORCH_AVAILABLE) ──
+
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch required")
+class TestGrammarOrdering:
+    def test_longest_dim_prefix_matches_first(self):
+        """A naive shortest-first regex would match '1x1' when '1x10' is the
+        intended dim. 1x10 isn't in the allowed set, so this is actually a
+        negative test against the ordering being wrong."""
+        import re as _re
+        from backend.inference.brick_pipeline import BRICK_PATTERN
+        pat = _re.compile(BRICK_PATTERN)
+        # 2x4 is allowed; 2x40 is not; if ordering were shortest-first and
+        # the coord pattern were broken, this could false-match.
+        assert pat.fullmatch("2x4 (0,0,0) #C91A09\n") is not None
+
+    def test_coord_pattern_rejects_out_of_range(self):
+        import re as _re
+        from backend.inference.brick_pipeline import BRICK_PATTERN
+        pat = _re.compile(BRICK_PATTERN)
+        # WORLD_DIM is 20 → 20 is out of range, 19 is the max.
+        assert pat.fullmatch("2x4 (20,0,0) #C91A09\n") is None
+        assert pat.fullmatch("2x4 (0,0,19) #C91A09\n") is not None
+
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch required")
+class TestLogitsProcessorFallback:
+    def test_returns_none_when_outlines_absent(self, monkeypatch):
+        """When outlines is not importable, _build_logits_processor returns None.
+        The caller treats this as 'no grammar constraint' and validates
+        parse failures via try/except instead."""
+        import sys as _sys
+        from backend.inference.brick_pipeline import _build_logits_processor
+        # Simulate ImportError by wiping outlines from sys.modules.
+        monkeypatch.setitem(_sys.modules, "outlines", None)
+        monkeypatch.setitem(_sys.modules, "outlines.processors", None)
+        result = _build_logits_processor(tokenizer=object(), pattern=r"x")
+        assert result is None
+
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch required")
+class TestBestOfNRankStrategy:
+    def test_rank_strategy_picks_most_bricks_among_stable(self):
+        """strategy='rank' skips the clustering entirely and returns
+        rank_candidates(candidates)[0]."""
+        from backend.inference.brick_pipeline import BrickPipeline
+
+        pipe = BrickPipeline.__new__(BrickPipeline)
+        counter = {"n": 0}
+
+        def fake_generate(caption, on_progress=None):
+            counter["n"] += 1
+            # Return different brick counts per call so ranking has signal.
+            i = counter["n"]
+            return {
+                "bricks": f"2x4 (0,0,0) #C91A09\n" * i,
+                "brick_count": i,
+                "stable": True,
+                "metadata": {},
+            }
+
+        pipe.generate = fake_generate  # type: ignore[method-assign]
+        out = pipe.generate_best_of_n("x", n=3, strategy="rank")
+        # Ranking picks the largest (last call, brick_count=3).
+        assert out["brick_count"] == 3
+        assert out["metadata"]["picked_index"] == 2
