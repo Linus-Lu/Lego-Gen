@@ -83,3 +83,18 @@ def test_load_color_palette_reads_json(tmp_path):
     }))
     palette = const._load_color_palette(str(colors_file))
     assert palette == {"C91A09": "Red", "0055BF": "Blue"}
+
+
+def test_lazy_palette_cold_load_reads_json(tmp_path, monkeypatch):
+    """Cold cache → _lazy_palette calls _load_color_palette(_COLORS_JSON)."""
+    import json
+    colors_file = tmp_path / "colors.json"
+    colors_file.write_text(json.dumps({
+        "1": {"rgb": "C91A09", "name": "Red", "is_trans": False},
+    }))
+    monkeypatch.setattr(const, "_COLORS_JSON", str(colors_file))
+    # Clear any existing cache so the cold-load path runs.
+    if hasattr(const._lazy_palette, "_cache"):
+        monkeypatch.delattr(const._lazy_palette, "_cache")
+    result = const._lazy_palette()
+    assert result == {"C91A09": "Red"}
