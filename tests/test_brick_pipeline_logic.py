@@ -451,3 +451,65 @@ def test_generate_one_brick_accepts_valid_line_before_eos():
     assert brick.color == "C91A09"
     assert rejections == 0
     assert stop_reason is None
+
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch required")
+def test_generate_one_brick_uses_fresh_logits_processor_for_retries():
+    """RegexLogitsProcessor carries generation state, so collision retries
+    need a fresh processor rather than reusing the completed one-line FSM.
+    """
+    import torch
+    from backend.brick.parser import Brick
+    from backend.inference.brick_pipeline import BrickPipeline
+    from backend.brick.occupancy import VoxelGrid
+
+    pipe = BrickPipeline.__new__(BrickPipeline)
+    pipe.device = "cpu"
+
+    decode_outputs = [
+        "2x4 (0,0,0) #C91A09\n<|im_end|>",  # collides with pre-placed brick
+        "2x4 (0,4,0) #C91A09\n<|im_end|>",  # accepted
+    ]
+    processors = []
+    processors_seen_by_model = []
+
+    class StubTok:
+        pad_token_id = 0
+        eos_token_id = 1
+        eos_token = "<|im_end|>"
+
+        def __init__(self):
+            self._i = 0
+
+        def decode(self, tokens, skip_special_tokens=False):
+            out = decode_outputs[self._i]
+            self._i = min(self._i + 1, len(decode_outputs) - 1)
+            return out
+
+    class StubModel:
+        def generate(self, input_ids, **kwargs):
+            processors_seen_by_model.append(kwargs["logits_processor"][0])
+            return torch.cat(
+                [input_ids, torch.tensor([[42]], device=input_ids.device)], dim=1
+            )
+
+    def processor_factory():
+        processor = object()
+        processors.append(processor)
+        return processor
+
+    pipe.tokenizer = StubTok()
+    pipe.model = StubModel()
+    grid = VoxelGrid()
+    grid.place(Brick(2, 4, 0, 0, 0, "C91A09"))
+
+    brick, rejections, stop_reason = pipe._generate_one_brick(
+        torch.tensor([[0, 1, 2, 3]]), grid, processor_factory
+    )
+
+    assert brick is not None
+    assert (brick.h, brick.w, brick.x, brick.y, brick.z) == (2, 4, 0, 4, 0)
+    assert rejections == 1
+    assert stop_reason is None
+    assert len(processors) == 2
+    assert processors_seen_by_model == processors

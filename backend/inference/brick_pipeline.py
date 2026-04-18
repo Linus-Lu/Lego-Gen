@@ -182,9 +182,10 @@ class BrickPipeline:
         grid = VoxelGrid()
         total_rejections = 0
         total_rollbacks = 0
-        # Fresh logits processor per call — see _fresh_logits_processor().
-        logits_processor = self._fresh_logits_processor()
-        outlines_enabled = logits_processor is not None
+        # RegexLogitsProcessor is stateful during generation, so use a fresh
+        # instance for each one-line decode attempt.
+        logits_processor_factory = self._fresh_logits_processor
+        outlines_enabled = logits_processor_factory() is not None
         palette_validation_enabled = _allowed_color_list() is not None
         termination_reason: Optional[str] = None
         hit_max_rejections = False
@@ -192,7 +193,11 @@ class BrickPipeline:
         for _ in range(MAX_ROLLBACKS):
             while len(bricks) < MAX_BRICKS:
                 brick, rej, stop_reason = _normalize_generate_step_result(
-                    self._generate_one_brick(input_ids, grid, logits_processor)
+                    self._generate_one_brick(
+                        input_ids,
+                        grid,
+                        logits_processor_factory if outlines_enabled else None,
+                    )
                 )
                 total_rejections += rej
                 if brick is None:
@@ -324,10 +329,15 @@ class BrickPipeline:
             pad_token_id=self.tokenizer.pad_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
         )
-        if logits_processor is not None:
-            gen_kwargs["logits_processor"] = [logits_processor]
 
         for attempt in range(MAX_REJECTIONS):
+            current_logits_processor = (
+                logits_processor() if callable(logits_processor) else logits_processor
+            )
+            if current_logits_processor is not None:
+                gen_kwargs["logits_processor"] = [current_logits_processor]
+            else:
+                gen_kwargs.pop("logits_processor", None)
             with torch.no_grad():
                 out = self.model.generate(input_ids, **gen_kwargs)
             text = self.tokenizer.decode(
