@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import inspect
 import importlib.util
 import json
 import os
@@ -232,6 +233,7 @@ def collect_environment_metadata(benchmark_limits: dict[str, Any] | None = None)
             "LEGOGEN_DEV_raw": os.environ.get("LEGOGEN_DEV"),
             "LEGOGEN_DEV_effective": bool(LEGOGEN_DEV),
             "run_mode": "dev-mock" if LEGOGEN_DEV else "real",
+            "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
         },
         "models": {
             "stage1_model_id": STAGE1_MODEL_NAME,
@@ -251,6 +253,86 @@ def collect_environment_metadata(benchmark_limits: dict[str, Any] | None = None)
     if benchmark_limits is not None:
         metadata["benchmark_limits"] = benchmark_limits
     return metadata
+
+
+def default_comparison_label() -> str:
+    adapter_path = BRICK_CHECKPOINT_DIR / "adapter_config.json"
+    if adapter_path.exists():
+        return BRICK_CHECKPOINT_DIR.name
+    return f"base::{BRICK_MODEL_NAME}"
+
+
+def _normalize_device_identifier(device: Any) -> str:
+    if isinstance(device, int):
+        return f"cuda:{device}"
+    return str(device)
+
+
+def _find_hf_device_map(model: Any) -> dict[str, str] | None:
+    if model is None:
+        return None
+    seen: set[int] = set()
+    queue = [model]
+    while queue:
+        current = queue.pop(0)
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        device_map = getattr(current, "hf_device_map", None)
+        if isinstance(device_map, dict) and device_map:
+            return {
+                str(module_name): _normalize_device_identifier(device)
+                for module_name, device in device_map.items()
+            }
+        for attr in ("model", "base_model", "module", "model_wrapped"):
+            child = getattr(current, attr, None)
+            if child is not None and id(child) not in seen:
+                queue.append(child)
+    return None
+
+
+def _collect_model_devices(model: Any, hf_device_map: dict[str, str] | None) -> list[str]:
+    devices = set(hf_device_map.values()) if hf_device_map else set()
+    if model is not None and not devices:
+        try:
+            for param in model.parameters():
+                devices.add(str(param.device))
+                if len(devices) >= 8:
+                    break
+        except Exception:
+            pass
+    return sorted(devices)
+
+
+def _supports_generation_limits(method: Any) -> bool:
+    if method is None:
+        return False
+    try:
+        params = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
+    required = {"max_bricks", "max_seconds", "stability_check_interval"}
+    return required.issubset(params.keys())
+
+
+def collect_pipeline_metadata(pipeline: Any, *, comparison_label: str) -> dict[str, Any]:
+    model = getattr(pipeline, "model", None)
+    hf_device_map = _find_hf_device_map(model)
+    model_devices = _collect_model_devices(model, hf_device_map)
+    cuda_devices = sorted(device for device in model_devices if device.startswith("cuda"))
+    return {
+        "comparison_label": comparison_label,
+        "pipeline_class": type(pipeline).__name__,
+        "model_class": type(model).__name__ if model is not None else None,
+        "supports_generate_best_of_n": callable(getattr(pipeline, "generate_best_of_n", None)),
+        "supports_generation_limits": _supports_generation_limits(getattr(pipeline, "generate", None)),
+        "hf_device_map": hf_device_map,
+        "hf_device_map_devices": sorted(set(hf_device_map.values())) if hf_device_map else [],
+        "hf_device_map_device_count": len(set(hf_device_map.values())) if hf_device_map else 0,
+        "model_devices": model_devices,
+        "cuda_model_devices": cuda_devices,
+        "model_parallel_active": len(cuda_devices) > 1,
+    }
 
 
 def real_skip_reason(metadata: dict[str, Any], *, allow_base_model: bool = False) -> str | None:
@@ -754,6 +836,8 @@ def write_report(
     plot_paths: list[Path] | None = None,
 ) -> None:
     run_mode = metadata["environment"]["run_mode"]
+    comparison = metadata.get("comparison", {}) or {}
+    pipeline_meta = metadata.get("pipeline", {}) or {}
     lines = [
         "# LEGOGen Benchmark Report",
         "",
@@ -762,13 +846,25 @@ def write_report(
         f"- Prompts: `{prompt_count}`",
         f"- Modes: `{', '.join(modes)}`",
         f"- Git commit: `{metadata['git']['commit'] or 'unknown'}`",
+        f"- Comparison label: `{comparison.get('label') or 'unknown'}`",
+        f"- Brick model ID: `{comparison.get('model_id') or metadata['models']['brick_model_id']}`",
+        f"- Brick checkpoint dir: `{comparison.get('checkpoint_dir') or metadata['models']['brick_checkpoint_dir']}`",
+        f"- Visible CUDA devices: `{metadata['torch'].get('device_count', 0)}`",
     ]
+    model_devices = pipeline_meta.get("model_devices") or []
+    if model_devices:
+        lines.append(f"- Model devices: `{', '.join(model_devices)}`")
+        lines.append(f"- Model parallel active: `{pipeline_meta.get('model_parallel_active', False)}`")
     if run_mode == "dev-mock":
         lines.append("- Note: this is a dev/mock smoke result, not a real performance measurement.")
     if limits["quick_smoke"]:
         lines.append("- Note: this is a capped smoke run, not a full performance measurement.")
     elif limits["capped_generation"]:
         lines.append("- Note: generation caps are enabled; this is not a full uncapped performance measurement.")
+    if pipeline_meta.get("model_parallel_active"):
+        lines.append("- Note: multi-GPU model sharding is active for this run.")
+    elif metadata["torch"].get("device_count", 0) > 1:
+        lines.append("- Note: multiple CUDA devices were visible, but the loaded model did not shard across them.")
     if limits["capped_generation"]:
         lines.extend([
             f"- Max bricks per sample: `{limits['max_bricks_per_sample']}`",
@@ -800,6 +896,7 @@ def run_benchmark(
     modes: tuple[str, ...] = ALL_MODES,
     bon_ns: list[int] | None = None,
     bon_strategy: str = "cluster",
+    comparison_label: str | None = None,
     allow_base_model: bool = False,
     quick_smoke: bool = False,
     max_bricks_per_sample: int | None = None,
@@ -836,12 +933,19 @@ def run_benchmark(
         "modes": list(modes),
         "bon_ns": bon_ns,
         "bon_strategy": bon_strategy,
+        "comparison_label": comparison_label or default_comparison_label(),
         "allow_base_model": allow_base_model,
         **limits,
     }
     _write_json(run_dir / "benchmark_config.json", config)
 
     metadata = collect_environment_metadata(limits)
+    metadata["comparison"] = {
+        "label": comparison_label or default_comparison_label(),
+        "model_id": BRICK_MODEL_NAME,
+        "checkpoint_dir": str(BRICK_CHECKPOINT_DIR),
+        "allow_base_model": allow_base_model,
+    }
     _write_json(run_dir / "environment_metadata.json", metadata)
     run_mode = metadata["environment"]["run_mode"]
 
@@ -863,6 +967,11 @@ def run_benchmark(
         from backend.inference.brick_pipeline import get_brick_pipeline
 
         pipeline = get_brick_pipeline()
+        metadata["pipeline"] = collect_pipeline_metadata(
+            pipeline,
+            comparison_label=metadata["comparison"]["label"],
+        )
+        _write_json(run_dir / "environment_metadata.json", metadata)
     except Exception as exc:
         skip_reason = f"Could not initialize brick pipeline: {exc!r}"
         summaries = _write_empty_outputs(run_dir, modes, run_mode=run_mode, ns=bon_ns, limits=limits)
@@ -982,6 +1091,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--modes", nargs="+", default=None, help="Modes to run: all, core, bon, stable-only, export.")
     parser.add_argument("--bon-ns", type=int, nargs="+", default=DEFAULT_NS, help="Best-of-N values to sweep.")
     parser.add_argument("--bon-strategy", choices=["rank", "cluster"], default="cluster", help="Selection strategy passed to generate_best_of_n.")
+    parser.add_argument("--comparison-label", type=str, default=None, help="Optional label for the benchmark target, useful when comparing checkpoints across runs.")
     parser.add_argument("--allow-base-model", action="store_true", help="Allow LEGOGEN_DEV=0 runs without the Stage 2 LoRA adapter present.")
     parser.add_argument("--quick-smoke", action="store_true", help="Run a capped core+export smoke benchmark, not a full performance run.")
     parser.add_argument("--max-bricks-per-sample", type=_positive_int, default=None, help="Cap each generated sample to this many bricks.")
@@ -1003,6 +1113,7 @@ def main(argv: list[str] | None = None) -> int:
         modes=modes,
         bon_ns=args.bon_ns,
         bon_strategy=args.bon_strategy,
+        comparison_label=args.comparison_label,
         allow_base_model=args.allow_base_model,
         quick_smoke=args.quick_smoke,
         max_bricks_per_sample=args.max_bricks_per_sample,

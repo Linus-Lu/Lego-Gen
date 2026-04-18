@@ -198,8 +198,16 @@ def test_quick_smoke_writes_capped_report_and_config(tmp_path, monkeypatch):
                 "run_mode": "dev-mock",
                 "LEGOGEN_DEV_raw": "1",
                 "LEGOGEN_DEV_effective": True,
+                "CUDA_VISIBLE_DEVICES": "0,1",
             },
             "git": {"commit": "test", "status_short": "", "dirty": False},
+            "models": {
+                "brick_model_id": "Qwen/Qwen3.5-4B",
+                "brick_checkpoint_dir": "/tmp/checkpoint",
+            },
+            "torch": {
+                "device_count": 2,
+            },
             "benchmark_limits": limits,
         },
     )
@@ -233,3 +241,104 @@ def test_quick_smoke_writes_capped_report_and_config(tmp_path, monkeypatch):
     report = (run_dir / "benchmark_report.md").read_text(encoding="utf-8")
     assert "capped smoke run" in report
     assert "not a full performance measurement" in report
+
+
+def test_collect_pipeline_metadata_reports_model_parallel_and_caps_support():
+    class StubModel:
+        hf_device_map = {"layer0": "cuda:0", "layer1": "cuda:1", "lm_head": "cuda:1"}
+
+    class StubPipeline:
+        def __init__(self):
+            self.model = StubModel()
+
+        def generate(self, caption, on_progress=None, *, max_bricks=None, max_seconds=None, stability_check_interval=None):
+            return {}
+
+        def generate_best_of_n(self, caption, n=1, strategy="cluster", on_progress=None, *, max_bricks=None, max_seconds=None, stability_check_interval=None):
+            return {}
+
+    metadata = bench.collect_pipeline_metadata(StubPipeline(), comparison_label="checkpoint-19000")
+
+    assert metadata["comparison_label"] == "checkpoint-19000"
+    assert metadata["pipeline_class"] == "StubPipeline"
+    assert metadata["model_class"] == "StubModel"
+    assert metadata["supports_generate_best_of_n"] is True
+    assert metadata["supports_generation_limits"] is True
+    assert metadata["hf_device_map_devices"] == ["cuda:0", "cuda:1"]
+    assert metadata["model_devices"] == ["cuda:0", "cuda:1"]
+    assert metadata["model_parallel_active"] is True
+
+
+def test_run_benchmark_persists_comparison_label_and_model_placement(tmp_path, monkeypatch):
+    class StubModel:
+        hf_device_map = {"layer0": "cuda:0", "layer1": "cuda:1"}
+
+    class StubPipeline:
+        def __init__(self):
+            self.model = StubModel()
+
+        def generate(self, caption, on_progress=None, *, max_bricks=None, max_seconds=None, stability_check_interval=None):
+            return {
+                "bricks": "2x4 (0,0,0) #C91A09",
+                "brick_count": 1,
+                "stable": True,
+                "metadata": {
+                    "generation_time_ms": 1,
+                    "termination_reason": "done",
+                    "final_stable": True,
+                    "rejections": 0,
+                    "rollbacks": 0,
+                    "outlines_enabled": True,
+                    "palette_validation_enabled": True,
+                    "requested_max_bricks": max_bricks,
+                    "requested_max_seconds": max_seconds,
+                    "requested_stability_check_interval": stability_check_interval,
+                    "hit_max_bricks": False,
+                    "hit_max_seconds": False,
+                },
+            }
+
+    prompts = tmp_path / "prompts.txt"
+    prompts.write_text("a red house\n", encoding="utf-8")
+    monkeypatch.setattr(bench, "collect_environment_metadata", lambda limits=None: {
+        "environment": {
+            "run_mode": "real",
+            "LEGOGEN_DEV_raw": "0",
+            "LEGOGEN_DEV_effective": False,
+            "CUDA_VISIBLE_DEVICES": "0,1",
+        },
+        "git": {"commit": "test", "status_short": "", "dirty": False},
+        "models": {
+            "brick_model_id": "Qwen/Qwen3.5-4B",
+            "brick_checkpoint_dir": "/tmp/checkpoint-19000",
+            "brick_adapter_config_present": True,
+        },
+        "torch": {
+            "cuda_available": True,
+            "device_count": 2,
+            "gpu_names": ["GPU0", "GPU1"],
+        },
+        "benchmark_limits": limits,
+    })
+    monkeypatch.setattr(bench, "real_skip_reason", lambda metadata, allow_base_model=False: None)
+    monkeypatch.setattr("backend.inference.brick_pipeline.get_brick_pipeline", lambda: StubPipeline())
+
+    run_dir = bench.run_benchmark(
+        prompts_path=prompts,
+        output_root=tmp_path / "runs",
+        timestamp="comparison-run",
+        modes=("core",),
+        comparison_label="checkpoint-19000",
+    )
+
+    config = json.loads((run_dir / "benchmark_config.json").read_text(encoding="utf-8"))
+    assert config["comparison_label"] == "checkpoint-19000"
+
+    metadata = json.loads((run_dir / "environment_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["comparison"]["label"] == "checkpoint-19000"
+    assert metadata["pipeline"]["model_parallel_active"] is True
+    assert metadata["pipeline"]["model_devices"] == ["cuda:0", "cuda:1"]
+
+    report = (run_dir / "benchmark_report.md").read_text(encoding="utf-8")
+    assert "Comparison label: `checkpoint-19000`" in report
+    assert "multi-GPU model sharding is active" in report

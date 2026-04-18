@@ -78,6 +78,55 @@ explains why the real run was skipped. To intentionally benchmark the base
 brick model without the LoRA adapter, pass `--allow-base-model` and document
 that choice in any report.
 
+## Comparison Targets
+
+The current harness benchmarks one configured Stage 2 target per run. The
+supported comparison targets today are:
+
+- the default Stage 2 LoRA checkpoint from `BRICK_CHECKPOINT_DIR`
+- any alternate Stage 2 LoRA checkpoint by overriding `BRICK_CHECKPOINT_DIR`
+- the base `Qwen/Qwen3.5-4B` model with `--allow-base-model`
+
+There is not yet a built-in multi-model sweep in one command. The intended
+workflow is one run per target, each with an explicit label:
+
+```bash
+BRICK_CHECKPOINT_DIR=/path/to/checkpoint-19000 \
+LEGOGEN_DEV=0 .venv/bin/python scripts/benchmark_legogen.py \
+  --comparison-label checkpoint-19000
+```
+
+The run directory records the comparison label, model ID, and checkpoint path
+in both `benchmark_config.json` and `environment_metadata.json`.
+
+## Multi-GPU Notes
+
+The benchmark harness can run on multi-GPU machines because the inference path
+loads the model with `device_map="auto"`. In practice this means:
+
+- the harness works when multiple GPUs are visible
+- `environment_metadata.json` records `CUDA_VISIBLE_DEVICES`, visible CUDA count,
+  and the model's resolved device placement
+- `benchmark_report.md` states whether model sharding across multiple GPUs was
+  actually active for that run
+
+For the current 4-bit Qwen 4B brick model, extra GPUs usually help with memory
+headroom rather than throughput. Hugging Face's `device_map="auto"` big-model
+inference can shard across GPUs, but it is still model-parallel inference, so
+only one GPU is typically active at a time while layers are handed off. This
+is still useful for larger comparison targets that do not fit comfortably on a
+single GPU, but it should not be treated as guaranteed speedup.
+
+## Common Extensions
+
+The current suite focuses on validity, stability, route behavior, export, and
+Best-of-N selection. Other common benchmarks worth running alongside it are:
+
+- checkpoint-to-checkpoint A/B runs with the same prompt set and explicit labels
+- prompt-faithfulness / canary quality evaluation via `scripts/eval_generation_quality.py`
+- concurrency and throughput benchmarks at the HTTP route level
+- VRAM and device-placement tracking for larger comparison targets
+
 ## Plotting
 
 `scripts/benchmark_legogen.py` automatically creates Best-of-N SVG plots when
