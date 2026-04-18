@@ -1,0 +1,41 @@
+{
+  "environment": {
+    "LEGOGEN_DEV_effective": false,
+    "LEGOGEN_DEV_raw": "0",
+    "run_mode": "real"
+  },
+  "git": {
+    "commit": "7463a65d43252d95919580ee7618424064670eed",
+    "dirty": true,
+    "status_short": "?? .coverage\n?? .playwright-mcp/\n?? AGENTS.md\n?? LEGOGen_FYP_Ch3_Ch4.md\n?? benchmark_runs/\n?? benchmarks/\n?? build-done.png\n?? build-idle.png\n?? docs/BENCHMARK_RUNBOOK.md\n?? docs/EXPERIMENT_REPORT_BASE.md\n?? docs/FYP_REPORT.md\n?? docs/superpowers/plans/2026-04-17-roadmap-items-4-to-9.md\n?? explore.png\n?? frontend/coverage/\n?? guide-cottage-step4.png\n?? guide-cottage.png\n?? home.png\n?? scripts/benchmark_legogen.py\n?? scripts/plot_benchmark_results.py\n?? spec.png\n?? tests/test_benchmark_legogen.py"
+  },
+  "models": {
+    "brick_adapter_config_present": false,
+    "brick_checkpoint_dir": "/Users/linuslu/Lego-Gen/backend/models/checkpoints/qwen35-4b-brick-lora",
+    "brick_checkpoint_present": false,
+    "brick_model_id": "Qwen/Qwen3.5-4B",
+    "stage1_adapter_config_present": false,
+    "stage1_checkpoint_dir": "/Users/linuslu/Lego-Gen/backend/models/checkpoints/qwen35-9b-lego-stage1-lora",
+    "stage1_checkpoint_present": false,
+    "stage1_model_id": "Qwen/Qwen3.5-9B"
+  },
+  "outlines": {
+    "available": false
+  },
+  "project_root": "/Users/linuslu/Lego-Gen",
+  "python": {
+    "executable": "/Users/linuslu/Lego-Gen/.venv/bin/python",
+    "platform": "macOS-26.0-arm64-arm-64bit",
+    "version": "3.11.9 (main, Apr  2 2024, 08:25:04) [Clang 15.0.0 (clang-1500.3.9.4)]"
+  },
+  "timestamp_local": "2026-04-18T16:48:06",
+  "torch": {
+    "available": true,
+    "bf16_supported": false,
+    "cuda_available": false,
+    "cuda_version": null,
+    "device_count": 0,
+    "gpu_names": [],
+    "version": "2.11.0"
+  }
+}

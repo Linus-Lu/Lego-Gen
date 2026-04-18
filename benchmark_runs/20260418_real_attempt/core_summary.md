@@ -1,0 +1,7 @@
+# Core Benchmark Summary
+
+No core rows were run.
+
+| run_mode | prompt_count | success_count | success_rate | stable_rate | final_stable_rate | parse_valid_rate | collision_free_rate | recomputed_stable_rate | export_success_rate | avg_brick_count | avg_wall_time_ms | p50_wall_time_ms | avg_generation_time_ms | avg_rejections | avg_rollbacks |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| real | 0 | 0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |

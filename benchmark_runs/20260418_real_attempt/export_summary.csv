@@ -1,0 +1,2 @@
+run_mode,export_attempt_count,export_success_count,export_success_rate,header_presence_rate,part_line_count_match_rate,avg_export_time_ms
+real,0,0,0.0,0.0,0.0,0.0

@@ -1,0 +1,19 @@
+{
+  "allow_base_model": false,
+  "bon_ns": [
+    1,
+    2,
+    4,
+    8,
+    16
+  ],
+  "bon_strategy": "cluster",
+  "limit_prompts": null,
+  "modes": [
+    "core",
+    "bon",
+    "stable-only",
+    "export"
+  ],
+  "prompts_path": "/Users/linuslu/Lego-Gen/benchmarks/prompts/core_prompts.txt"
+}

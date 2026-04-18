@@ -1,0 +1,12 @@
+# Curated text prompts for the current brick-coordinate pipeline benchmark.
+# Blank lines and comments are ignored by scripts/benchmark_legogen.py.
+a small red house with white walls, a centered door, and a yellow roof
+a low blue race car with black wheels, a flat spoiler, and a pointed nose
+a green park bench with two blocky supports and a slatted back
+a compact white robot with square feet, short arms, and a single antenna
+a yellow duck with an orange beak, a small tail, and a rounded body
+a red arched bridge with gray base supports and a flat deck
+a black and gray camera with a raised circular lens and a small top button
+a blue and white lighthouse with a striped tower and a wider base
+a small train engine with a red cabin, black chimney, and flat front
+a purple flower in a green pot with a short stem and square petals
