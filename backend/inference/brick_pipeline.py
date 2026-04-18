@@ -182,10 +182,17 @@ class BrickPipeline:
         grid = VoxelGrid()
         total_rejections = 0
         total_rollbacks = 0
-        # RegexLogitsProcessor is stateful during generation, so use a fresh
-        # instance for each one-line decode attempt.
-        logits_processor_factory = self._fresh_logits_processor
-        outlines_enabled = logits_processor_factory() is not None
+        # RegexLogitsProcessor is stateful during generation. Compile the guide
+        # once, then copy it to reset per-attempt state without rebuilding the FSM.
+        logits_processor = self._fresh_logits_processor()
+        outlines_enabled = logits_processor is not None
+
+        def make_logits_processor():
+            if logits_processor is None:
+                return None
+            copy_processor = getattr(logits_processor, "copy", None)
+            return copy_processor() if callable(copy_processor) else logits_processor
+
         palette_validation_enabled = _allowed_color_list() is not None
         termination_reason: Optional[str] = None
         hit_max_rejections = False
@@ -196,7 +203,7 @@ class BrickPipeline:
                     self._generate_one_brick(
                         input_ids,
                         grid,
-                        logits_processor_factory if outlines_enabled else None,
+                        make_logits_processor if outlines_enabled else None,
                     )
                 )
                 total_rejections += rej
