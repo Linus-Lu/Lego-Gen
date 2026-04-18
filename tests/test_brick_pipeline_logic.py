@@ -410,3 +410,44 @@ def test_generate_one_brick_rejects_malformed_line_without_raising():
     assert (brick.h, brick.w, brick.x, brick.y, brick.z) == (2, 4, 0, 0, 0)
     assert rejections == 1  # skipped exactly one malformed line
     assert stop_reason is None
+
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch required")
+def test_generate_one_brick_accepts_valid_line_before_eos():
+    """Regression: constrained decoding often returns one valid brick line
+    followed by the chat EOS token. The parser should keep that brick instead
+    of treating any EOS occurrence as immediate termination.
+    """
+    import torch
+    from backend.inference.brick_pipeline import BrickPipeline
+    from backend.brick.occupancy import VoxelGrid
+
+    pipe = BrickPipeline.__new__(BrickPipeline)
+    pipe.device = "cpu"
+
+    class StubTok:
+        pad_token_id = 0
+        eos_token_id = 1
+        eos_token = "<|im_end|>"
+
+        def decode(self, tokens, skip_special_tokens=False):
+            return "1x2 (4,18,0) #C91A09\n<|im_end|>"
+
+    class StubModel:
+        def generate(self, input_ids, **kwargs):
+            return torch.cat(
+                [input_ids, torch.tensor([[42]], device=input_ids.device)], dim=1
+            )
+
+    pipe.tokenizer = StubTok()
+    pipe.model = StubModel()
+
+    brick, rejections, stop_reason = pipe._generate_one_brick(
+        torch.tensor([[0, 1, 2, 3]]), VoxelGrid()
+    )
+
+    assert brick is not None
+    assert (brick.h, brick.w, brick.x, brick.y, brick.z) == (1, 2, 4, 18, 0)
+    assert brick.color == "C91A09"
+    assert rejections == 0
+    assert stop_reason is None

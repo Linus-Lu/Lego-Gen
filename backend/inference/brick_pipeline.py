@@ -333,7 +333,10 @@ class BrickPipeline:
             text = self.tokenizer.decode(
                 out[0, input_ids.shape[1]:], skip_special_tokens=False
             )
-            if self.tokenizer.eos_token in text or not text.strip():
+            eos_token = self.tokenizer.eos_token
+            if eos_token and eos_token in text:
+                text = text.split(eos_token, 1)[0]
+            if not text.strip():
                 return None, attempt, "eos"
             first_line = text.strip().split("\n")[0].strip()
             try:
