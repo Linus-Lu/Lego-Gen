@@ -143,38 +143,61 @@ def _inspect_params(cls):
         return set()
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--resume", type=str, default=None,
-                        help="Checkpoint path to resume from, or 'auto' for latest")
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default="none",
+        help="Resume policy: 'none', 'auto', or an explicit checkpoint path.",
+    )
     parser.add_argument("--output-dir", type=str, default=str(BRICK_CHECKPOINT_DIR),
                         help="Directory to save adapter checkpoints")
+    parser.add_argument("--data-dir", type=Path, default=BRICK_TRAINING_DATA,
+                        help="Directory containing train.jsonl and test.jsonl")
     parser.add_argument("--epochs", type=int, default=BRICK_NUM_EPOCHS,
                         help="Number of training epochs")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Stop after this many optimizer steps; useful for canary gates")
+    parser.add_argument("--save-total-limit", type=int, default=5,
+                        help="How many recent checkpoints to retain")
     parser.add_argument("--no-wandb", action="store_true",
                         help="Disable Weights & Biases logging")
+    return parser
+
+
+def _resolve_resume_checkpoint(resume: str | None, output_dir: str) -> str | None:
+    policy = (resume or "none").strip()
+    if policy.lower() in {"", "none", "false", "0"}:
+        return None
+    if policy.lower() != "auto":
+        return policy
+
+    ckpt_dir = Path(str(output_dir))
+    if not ckpt_dir.exists():
+        return None
+    checkpoints = sorted(
+        ckpt_dir.glob("checkpoint-*"),
+        key=lambda p: int(p.name.split("-")[-1])
+        if p.name.split("-")[-1].isdigit() else 0,
+    )
+    return str(checkpoints[-1]) if checkpoints else None
+
+
+def main() -> None:
+    parser = build_arg_parser()
     # parse_args (not parse_known_args) so unknown flags surface as errors;
     # the silent-drop behaviour previously here hid typos in scripts.
     args = parser.parse_args()
 
-    # Auto-detect latest checkpoint
-    if args.resume is None or args.resume == "auto":
-        ckpt_dir = Path(str(args.output_dir))
-        if ckpt_dir.exists():
-            checkpoints = sorted(
-                ckpt_dir.glob("checkpoint-*"),
-                key=lambda p: int(p.name.split("-")[-1])
-                if p.name.split("-")[-1].isdigit() else 0)
-            if checkpoints:
-                args.resume = str(checkpoints[-1])
-                print(f"Auto-resuming from: {args.resume}", flush=True)
-            else:
-                args.resume = None
-        else:
-            args.resume = None
+    args.resume = _resolve_resume_checkpoint(args.resume, args.output_dir)
+    if args.resume:
+        print(f"Resuming from: {args.resume}", flush=True)
+    else:
+        print("Starting clean Stage 2 LoRA run (no checkpoint resume).", flush=True)
 
-    train_path = BRICK_TRAINING_DATA / "train.jsonl"
-    test_path = BRICK_TRAINING_DATA / "test.jsonl"
+    train_path = args.data_dir / "train.jsonl"
+    test_path = args.data_dir / "test.jsonl"
 
     if not train_path.exists():
         print(f"ERROR: {train_path} not found. Run prepare_brick_dataset.py first.")
@@ -248,7 +271,7 @@ def main() -> None:
         gradient_checkpointing_kwargs={"use_reentrant": False},
         logging_steps=10,
         save_steps=200,
-        save_total_limit=2,
+        save_total_limit=args.save_total_limit,
         eval_strategy="steps",
         eval_steps=200,
         load_best_model_at_end=True,
@@ -258,6 +281,10 @@ def main() -> None:
         dataloader_pin_memory=True,
         dataloader_num_workers=4,
     )
+    if args.max_steps is not None:
+        if args.max_steps <= 0:
+            raise SystemExit("--max-steps must be positive")
+        base_kwargs["max_steps"] = args.max_steps
 
     # Decide which config class to use
     ConfigClass = SFTConfig if SFTConfig is not None else TrainingArguments

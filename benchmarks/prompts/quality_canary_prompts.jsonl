@@ -1,0 +1,5 @@
+{"id":"house_red_white_yellow","prompt":"a red house with white walls and a yellow roof","expected_colors":["C91A09","FFFFFF","F2CD37"],"min_distinct_colors":3,"min_bricks":4}
+{"id":"car_blue_black_white","prompt":"a blue car with black wheels and white windows","expected_colors":["0055BF","05131D","FFFFFF"],"min_distinct_colors":3,"min_bricks":4}
+{"id":"tree_green_dark_gray","prompt":"a green tree with a dark gray trunk","expected_colors":["237841","6D6E5C"],"min_distinct_colors":2,"min_bricks":3}
+{"id":"tower_gray_red_top","prompt":"a gray tower with a red top","expected_colors":["9BA19D","C91A09"],"min_distinct_colors":2,"min_bricks":3}
+{"id":"bridge_yellow_blue","prompt":"a yellow bridge with blue supports","expected_colors":["F2CD37","0055BF"],"min_distinct_colors":2,"min_bricks":3}

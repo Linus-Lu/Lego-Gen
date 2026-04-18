@@ -70,6 +70,8 @@ def _build_grammar_pattern() -> str:
 
 
 BRICK_PATTERN = _build_grammar_pattern()
+DONE_TOKEN = "DONE"
+STEP_PATTERN = rf"(?:{BRICK_PATTERN}|{DONE_TOKEN}\n)"
 
 MAX_BRICKS = 500
 MAX_REJECTIONS = 500
@@ -153,7 +155,7 @@ class BrickPipeline:
         FSM-state dict accumulates one entry per token across calls and is
         never reset, which would leak memory in a long-running server.
         """
-        return _build_logits_processor(self.tokenizer, BRICK_PATTERN)
+        return _build_logits_processor(self.tokenizer, STEP_PATTERN)
 
     def generate(
         self,
@@ -220,6 +222,7 @@ class BrickPipeline:
         hit_max_rejections = False
         hit_max_bricks = False
         hit_max_seconds = False
+        hit_done = False
 
         for _ in range(MAX_ROLLBACKS):
             while len(bricks) < effective_max_bricks:
@@ -237,6 +240,7 @@ class BrickPipeline:
                 total_rejections += rej
                 if brick is None:
                     termination_reason = stop_reason or "eos"
+                    hit_done = hit_done or stop_reason == "done"
                     hit_max_rejections = hit_max_rejections or stop_reason == "max_rejections"
                     break
                 bricks.append(brick)
@@ -316,6 +320,7 @@ class BrickPipeline:
                 "hit_max_bricks": hit_max_bricks,
                 "hit_max_seconds": hit_max_seconds,
                 "hit_max_rollbacks": total_rollbacks >= MAX_ROLLBACKS,
+                "hit_done": hit_done,
                 "requested_max_bricks": max_bricks,
                 "requested_max_seconds": max_seconds,
                 "requested_stability_check_interval": stability_check_interval,
@@ -428,6 +433,8 @@ class BrickPipeline:
             if not text.strip():
                 return None, attempt, "eos"
             first_line = text.strip().split("\n")[0].strip()
+            if first_line == DONE_TOKEN:
+                return None, attempt, "done"
             try:
                 brick = parse_brick(first_line)
             except ValueError:
@@ -497,11 +504,12 @@ class MockBrickPipeline:
             if on_progress is not None:
                 on_progress({"type": "brick", "count": i + 1})
         hit_max_bricks = max_bricks is not None and max_bricks < len(self._HOUSE_BRICKS)
-        termination_reason = "eos"
+        termination_reason = "done"
         if hit_max_seconds:
             termination_reason = "max_seconds"
         elif hit_max_bricks:
             termination_reason = "max_bricks"
+        hit_done = termination_reason == "done"
         return {
             "bricks": "\n".join(lines),
             "brick_count": len(lines),
@@ -519,6 +527,7 @@ class MockBrickPipeline:
                 "hit_max_bricks": hit_max_bricks,
                 "hit_max_seconds": hit_max_seconds,
                 "hit_max_rollbacks": False,
+                "hit_done": hit_done,
                 "requested_max_bricks": max_bricks,
                 "requested_max_seconds": max_seconds,
                 "requested_stability_check_interval": stability_check_interval,

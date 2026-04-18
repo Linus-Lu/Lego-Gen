@@ -27,11 +27,16 @@ try:
     from backend.inference.brick_pipeline import (
         BASE_TEMPERATURE,
         BRICK_PATTERN,
+        DONE_TOKEN,
         MAX_BRICKS,
         MAX_REJECTIONS,
         MAX_ROLLBACKS,
+        STEP_PATTERN,
         BrickPipeline,
+        _allowed_color_list,
         _color_is_allowed,
+        _color_pattern,
+        _normalize_generate_step_result,
     )
     _MODULE_IMPORTABLE = True
 except (ImportError, FileNotFoundError, OSError):
@@ -143,12 +148,48 @@ class TestGrammarPattern:
 
 
 @pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
+class TestStepGrammarPattern:
+    def test_accepts_done_stop_line(self):
+        pat = re.compile(STEP_PATTERN)
+        assert pat.fullmatch(f"{DONE_TOKEN}\n") is not None
+
+    def test_accepts_brick_line(self):
+        pat = re.compile(STEP_PATTERN)
+        assert pat.fullmatch("2x4 (0,0,0) #C91A09\n") is not None
+
+    def test_rejects_malformed_stop_text(self):
+        pat = re.compile(STEP_PATTERN)
+        assert pat.fullmatch("DONE") is None
+        assert pat.fullmatch("FINISHED\n") is None
+
+
+@pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
 class TestPaletteValidation:
     def test_palette_accepts_known_color(self):
         assert _color_is_allowed("C91A09") is True
 
     def test_palette_rejects_unknown_color(self):
         assert _color_is_allowed("123456") is False
+
+    def test_palette_helpers_fall_back_to_generic_hex_when_palette_unavailable(self, monkeypatch):
+        import backend.inference.brick_pipeline as bp
+
+        class MissingPalette:
+            def __iter__(self):
+                raise OSError("missing")
+
+        monkeypatch.setattr(bp, "ALLOWED_COLORS", MissingPalette())
+
+        assert _allowed_color_list() is None
+        assert _color_pattern() == r"[0-9A-Fa-f]{6}"
+        assert _color_is_allowed("123abc") is True
+
+
+@pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
+def test_normalize_generate_step_result_rejects_unexpected_shape():
+    with pytest.raises(TypeError, match="Unexpected _generate_one_brick result"):
+        _normalize_generate_step_result("not a tuple")
+
 
 
 # ── TestGenerateLoop (requires torch — test body uses torch.tensor) ──
@@ -243,6 +284,7 @@ class TestGenerateLoop:
         assert "hit_max_bricks" in result["metadata"]
         assert "hit_max_seconds" in result["metadata"]
         assert "hit_max_rollbacks" in result["metadata"]
+        assert "hit_done" in result["metadata"]
         assert "requested_max_bricks" in result["metadata"]
         assert "requested_max_seconds" in result["metadata"]
         assert "requested_stability_check_interval" in result["metadata"]
@@ -263,6 +305,22 @@ class TestGenerateLoop:
         result = pipeline.generate("test")
         assert result["metadata"]["termination_reason"] == "max_rejections"
         assert result["metadata"]["hit_max_rejections"] is True
+
+    def test_done_stops_generation_before_max_bricks(self):
+        from backend.brick.parser import Brick
+
+        pipeline = self._make_pipeline([
+            (Brick(2, 4, 0, 0, 0, "C91A09"), 0),
+            (None, 0, "done"),
+            (Brick(2, 4, 0, 4, 0, "FFFFFF"), 0),
+        ])
+
+        result = pipeline.generate("test", max_bricks=10)
+
+        assert result["brick_count"] == 1
+        assert result["metadata"]["termination_reason"] == "done"
+        assert result["metadata"]["hit_done"] is True
+        assert result["metadata"]["hit_max_bricks"] is False
 
     def test_max_bricks_caps_generation_and_metadata(self):
         from backend.brick.parser import Brick
@@ -491,6 +549,41 @@ def test_generate_one_brick_accepts_valid_line_before_eos():
     assert brick.color == "C91A09"
     assert rejections == 0
     assert stop_reason is None
+
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch required")
+def test_generate_one_brick_returns_done_stop_reason():
+    import torch
+    from backend.inference.brick_pipeline import BrickPipeline
+    from backend.brick.occupancy import VoxelGrid
+
+    pipe = BrickPipeline.__new__(BrickPipeline)
+    pipe.device = "cpu"
+
+    class StubTok:
+        pad_token_id = 0
+        eos_token_id = 1
+        eos_token = "<|im_end|>"
+
+        def decode(self, tokens, skip_special_tokens=False):
+            return "DONE\n<|im_end|>"
+
+    class StubModel:
+        def generate(self, input_ids, **kwargs):
+            return torch.cat(
+                [input_ids, torch.tensor([[42]], device=input_ids.device)], dim=1
+            )
+
+    pipe.tokenizer = StubTok()
+    pipe.model = StubModel()
+
+    brick, rejections, stop_reason = pipe._generate_one_brick(
+        torch.tensor([[0, 1, 2, 3]]), VoxelGrid()
+    )
+
+    assert brick is None
+    assert rejections == 0
+    assert stop_reason == "done"
 
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch required")

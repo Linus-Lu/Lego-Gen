@@ -75,7 +75,12 @@ STAGE1_SYSTEM_PROMPT = (
 
 # ── Stage 2: Text → Brick coordinates (Qwen3.5-4B + LoRA) ──────────────
 BRICK_MODEL_NAME = "Qwen/Qwen3.5-4B"
-BRICK_CHECKPOINT_DIR = CHECKPOINT_DIR / "qwen35-4b-brick-lora"
+BRICK_CHECKPOINT_DIR = Path(
+    os.environ.get(
+        "BRICK_CHECKPOINT_DIR",
+        CHECKPOINT_DIR / "qwen35-4b-brick-lora",
+    )
+)
 BRICK_LEARNING_RATE = 1e-3
 BRICK_BATCH_SIZE = 1
 BRICK_GRADIENT_ACCUMULATION = 16
@@ -84,7 +89,7 @@ BRICK_NUM_EPOCHS = 3
 BRICK_LORA_R = 32
 BRICK_LORA_ALPHA = 64
 BRICK_LORA_DROPOUT = 0.05
-BRICK_TRAINING_DATA = DATA_DIR / "brick_training"
+BRICK_TRAINING_DATA = Path(os.environ.get("BRICK_TRAINING_DATA", DATA_DIR / "brick_training"))
 
 # ── Inference ──────────────────────────────────────────────────────────
 INFERENCE_TIMEOUT_SECONDS = 120

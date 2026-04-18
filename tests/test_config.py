@@ -33,6 +33,20 @@ def test_paths_are_absolute():
     assert cfg.CHECKPOINT_DIR.parts[-3:] == ("backend", "models", "checkpoints")
 
 
+def test_stage2_paths_can_be_overridden_by_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("BRICK_CHECKPOINT_DIR", str(tmp_path / "ckpt"))
+    monkeypatch.setenv("BRICK_TRAINING_DATA", str(tmp_path / "data"))
+    import backend.config as cfg
+    importlib.reload(cfg)
+
+    assert cfg.BRICK_CHECKPOINT_DIR == tmp_path / "ckpt"
+    assert cfg.BRICK_TRAINING_DATA == tmp_path / "data"
+
+    monkeypatch.delenv("BRICK_CHECKPOINT_DIR", raising=False)
+    monkeypatch.delenv("BRICK_TRAINING_DATA", raising=False)
+    importlib.reload(cfg)
+
+
 def test_coco_category_mapping_nonempty():
     import backend.config as cfg
     assert "chair" in cfg.COCO_TO_ST2B_CATEGORY

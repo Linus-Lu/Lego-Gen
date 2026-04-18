@@ -21,7 +21,8 @@ def test_mock_generate_emits_expected_bricks():
     assert out["brick_count"] == 12
     assert out["stable"] is True
     assert out["metadata"]["model_version"] == "mock-brick-v1"
-    assert out["metadata"]["termination_reason"] == "eos"
+    assert out["metadata"]["termination_reason"] == "done"
+    assert out["metadata"]["hit_done"] is True
     assert out["metadata"]["final_stable"] is True
     # One progress event per brick.
     assert [e["count"] for e in events] == list(range(1, 13))
@@ -32,6 +33,26 @@ def test_mock_generate_no_progress_callback():
     pipe = MockBrickPipeline()
     out = pipe.generate("a small house")
     assert out["brick_count"] == 12
+
+
+def test_mock_generate_reports_caps_and_validates_limits():
+    pipe = MockBrickPipeline()
+
+    capped = pipe.generate("a small house", max_bricks=2)
+    assert capped["brick_count"] == 2
+    assert capped["metadata"]["termination_reason"] == "max_bricks"
+    assert capped["metadata"]["hit_done"] is False
+
+    timed_out = pipe.generate("a small house", max_seconds=0)
+    assert timed_out["brick_count"] == 0
+    assert timed_out["metadata"]["termination_reason"] == "max_seconds"
+
+    with pytest.raises(ValueError, match="max_bricks"):
+        pipe.generate("x", max_bricks=-1)
+    with pytest.raises(ValueError, match="max_seconds"):
+        pipe.generate("x", max_seconds=-1)
+    with pytest.raises(ValueError, match="stability_check_interval"):
+        pipe.generate("x", stability_check_interval=0)
 
 
 def test_mock_generate_best_of_n_stamps_metadata():

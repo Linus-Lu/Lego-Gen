@@ -1,3 +1,4 @@
+import backend.brick.ldraw as ldraw
 from backend.brick.ldraw import export_ldr
 from backend.brick.parser import Brick
 
@@ -26,4 +27,28 @@ def test_export_ldr_falls_back_to_main_color_for_unknown_hex():
         [Brick(h=1, w=1, x=0, y=0, z=0, color="ABCDEF")],
         title="Unknown Color",
     )
+    assert "1 16" in out
+
+
+def test_ldraw_color_loader_skips_transparent_and_invalid_entries(tmp_path, monkeypatch):
+    colors = tmp_path / "colors.json"
+    colors.write_text(
+        '{"4":{"rgb":"C91A09","is_trans":false},'
+        '"15":{"rgb":"FFFFFF","is_trans":true},'
+        '"99":{"rgb":"BAD","is_trans":false}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ldraw, "_COLORS_JSON", colors)
+
+    assert ldraw._load_ldraw_color_codes() == {"C91A09": 4}
+
+
+def test_export_ldr_uses_main_color_when_palette_file_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(ldraw, "_COLORS_JSON", tmp_path / "missing.json")
+
+    out = export_ldr(
+        [Brick(h=1, w=1, x=0, y=0, z=0, color="C91A09")],
+        title="Missing Palette",
+    )
+
     assert "1 16" in out

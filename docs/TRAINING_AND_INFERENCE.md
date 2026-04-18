@@ -147,14 +147,18 @@ consumed by `BrickPipeline`.
 python -m backend.training.train_brick \
   --output-dir backend/models/checkpoints/qwen35-4b-brick-lora/ \
   --epochs 3 \
-  [--resume auto]
+  [--resume none|auto|/path/to/checkpoint]
+  [--data-dir data/brick_training_v2]
+  [--max-steps 80]
+  [--save-total-limit 5]
 ```
 
 **Data** — JSONL files in `BRICK_TRAINING_DATA` (default
 `data/brick_training/train.jsonl`, `test.jsonl`), loaded through HF
-`datasets.load_dataset`. Each row is a chat-format message list ending in
-the brick sequence as the assistant reply. `prepare_brick_dataset.py`
-generates these from Rebrickable CSVs.
+`datasets.load_dataset`. Each row is a chat-format message list whose
+assistant reply ends with brick lines followed by `DONE`.
+`prepare_brick_dataset.py` generates these from StableText2Brick and can
+append source-controlled v2 canary examples.
 
 **Curriculum** — samples are split into "untruncated" (estimated tokens
 `(len(content)/3.0) + 80` ≤ `max_seq_length`) and "truncated", then
@@ -179,7 +183,7 @@ weights to a single vectorized cross-entropy call.
 - `learning_rate=1e-3`, `lr_scheduler="cosine"`, `warmup_steps=100`
 - `max_seq_length=4096`, `num_epochs=3`
 - `bf16=True`, `gradient_checkpointing=True`, `optim="adamw_torch"`
-- `save_steps=200`, `save_total_limit=2`, W&B when available
+- `save_steps=200`, `save_total_limit=5` by default, W&B when available
 
 **LoRA config** — `r=32`, `alpha=64`, `dropout=0.05`,
 `target_modules=["q_proj", "v_proj"]` (narrower than Stage 1 because the
@@ -275,10 +279,10 @@ Generation constants:
   collision, which doesn't benefit from higher temperature.
 
 The decoder runs under an `outlines.processors.RegexLogitsProcessor` built
-from `BRICK_PATTERN` (the 14 allowed dim strings × coord tuple × hex
-color), attached at `BrickPipeline.__init__` and passed into every
-`model.generate(...)` call. This forces every token sequence to be a
-syntactically valid brick line before it reaches the voxel check.
+from `STEP_PATTERN`: either `DONE\n` or `BRICK_PATTERN` (the 14 allowed dim
+strings × coord tuple × hex color). This forces every generated step to be
+either a syntactically valid brick line before the voxel check or an
+explicit learned stop.
 
 Prompt format:
 

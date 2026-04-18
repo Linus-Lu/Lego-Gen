@@ -374,7 +374,7 @@ Each row of the JSONL is a chat-style message list:
 {"messages": [
     {"role": "system",    "content": "You are a LEGO master builder."},
     {"role": "user",      "content": "Create a colored LEGO model...{caption}"},
-    {"role": "assistant", "content": "2x4 (0,0,0) #C91A09\n2x4 (2,0,0) #C91A09\n..."}
+    {"role": "assistant", "content": "2x4 (0,0,0) #C91A09\n2x4 (2,0,0) #C91A09\n...\nDONE"}
 ]}
 ```
 
@@ -542,9 +542,9 @@ already occupied.
 3. The brick fits in `[0, WORLD_DIM) ^ 3` (no overflow).
 4. No voxel in the brick's footprint is already occupied.
 
-If `can_place` returns False, `_generate_one_brick`
-(`brick_pipeline.py:180`) simply resamples the next brick line with the
-same temperature. It tries up to `MAX_REJECTIONS=500` times.
+If `can_place` returns False, `_generate_one_brick` resamples the next
+step with the same temperature. A step can be either one brick line or
+`DONE`. It tries up to `MAX_REJECTIONS=500` times.
 
 **Why resampling works.** The grammar makes sure the resampled line is
 *syntactically* valid. Stochastic sampling gives the model another shot
@@ -718,7 +718,7 @@ POST /api/generate-stream  (multipart: image=<photo.png>)
                 ├── loop up to MAX_ROLLBACKS=100 times:
                 │   └── loop up to MAX_BRICKS=500 times:
                 │       └── _generate_one_brick:
-                │           ├── Qwen3.5-4B sample 1 brick line
+                │           ├── Qwen3.5-4B sample 1 brick line or DONE
                 │           │   (under outlines RegexLogitsProcessor)
                 │           ├── parse → VoxelGrid.can_place?
                 │           ├── YES: place; emit brick event
