@@ -33,6 +33,7 @@ try:
         MAX_ROLLBACKS,
         STEP_PATTERN,
         BrickPipeline,
+        _build_grammar_pattern,
         _allowed_color_list,
         _call_with_supported_kwargs,
         _color_is_allowed,
@@ -129,7 +130,7 @@ class TestGrammarPattern:
         assert pat.fullmatch("") is None
 
     def test_rejects_colors_outside_palette(self, seeded_palette):
-        pat = re.compile(BRICK_PATTERN)
+        pat = re.compile(_build_grammar_pattern())
         assert pat.fullmatch("2x4 (0,0,0) #123456\n") is None
 
     def test_grammar_matches_are_parseable_by_backend_regex(self):
