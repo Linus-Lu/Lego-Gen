@@ -155,7 +155,15 @@ class BrickPipeline:
         """
         return _build_logits_processor(self.tokenizer, BRICK_PATTERN)
 
-    def generate(self, caption: str, on_progress=None) -> dict:  # pragma: no cover — runs the real torch model; MockBrickPipeline.generate covers the shape.
+    def generate(
+        self,
+        caption: str,
+        on_progress=None,
+        *,
+        max_bricks: int | None = None,
+        max_seconds: float | None = None,
+        stability_check_interval: int | None = None,
+    ) -> dict:  # pragma: no cover — runs the real torch model; MockBrickPipeline.generate covers the shape.
         """Generate a brick structure for *caption*.
 
         If ``on_progress`` is provided, it is called with events of the form:
@@ -164,7 +172,21 @@ class BrickPipeline:
         """
         import torch
 
+        if max_bricks is not None and max_bricks < 0:
+            raise ValueError("max_bricks must be non-negative")
+        if max_seconds is not None and max_seconds < 0:
+            raise ValueError("max_seconds must be non-negative")
+        if stability_check_interval is not None and stability_check_interval <= 0:
+            raise ValueError("stability_check_interval must be positive")
+
         t0 = time.time()
+        start_monotonic = time.monotonic()
+        deadline = start_monotonic + max_seconds if max_seconds is not None else None
+        effective_max_bricks = MAX_BRICKS if max_bricks is None else max_bricks
+
+        def time_exceeded() -> bool:
+            return deadline is not None and time.monotonic() >= deadline
+
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": USER_TEMPLATE.format(caption=caption)},
@@ -196,9 +218,15 @@ class BrickPipeline:
         palette_validation_enabled = _allowed_color_list() is not None
         termination_reason: Optional[str] = None
         hit_max_rejections = False
+        hit_max_bricks = False
+        hit_max_seconds = False
 
         for _ in range(MAX_ROLLBACKS):
-            while len(bricks) < MAX_BRICKS:
+            while len(bricks) < effective_max_bricks:
+                if time_exceeded():
+                    hit_max_seconds = True
+                    termination_reason = "max_seconds"
+                    break
                 brick, rej, stop_reason = _normalize_generate_step_result(
                     self._generate_one_brick(
                         input_ids,
@@ -222,10 +250,26 @@ class BrickPipeline:
                 )
                 if on_progress is not None:
                     on_progress({"type": "brick", "count": len(bricks)})
+                if time_exceeded():
+                    hit_max_seconds = True
+                    termination_reason = "max_seconds"
+                    break
+                if (
+                    stability_check_interval is not None
+                    and len(bricks) % stability_check_interval == 0
+                    and not is_stable(bricks)
+                ):
+                    termination_reason = "early_unstable"
+                    break
             else:
                 termination_reason = "max_bricks"
+                hit_max_bricks = True
 
+            if hit_max_seconds:
+                break
             if is_stable(bricks):
+                break
+            if hit_max_bricks and max_bricks is not None:
                 break
 
             idx = find_first_unstable(bricks)
@@ -269,11 +313,26 @@ class BrickPipeline:
                 "outlines_enabled": outlines_enabled,
                 "palette_validation_enabled": palette_validation_enabled,
                 "hit_max_rejections": hit_max_rejections,
+                "hit_max_bricks": hit_max_bricks,
+                "hit_max_seconds": hit_max_seconds,
                 "hit_max_rollbacks": total_rollbacks >= MAX_ROLLBACKS,
+                "requested_max_bricks": max_bricks,
+                "requested_max_seconds": max_seconds,
+                "requested_stability_check_interval": stability_check_interval,
             },
         }
 
-    def generate_best_of_n(self, caption: str, n: int = 16, strategy: str = "cluster", on_progress=None) -> dict:  # pragma: no cover — calls real generate(); BoN logic covered via MockBrickPipeline / __new__ stubs.
+    def generate_best_of_n(
+        self,
+        caption: str,
+        n: int = 16,
+        strategy: str = "cluster",
+        on_progress=None,
+        *,
+        max_bricks: int | None = None,
+        max_seconds: float | None = None,
+        stability_check_interval: int | None = None,
+    ) -> dict:  # pragma: no cover — calls real generate(); BoN logic covered via MockBrickPipeline / __new__ stubs.
         """Run generate() n times and return the chosen sample.
 
         strategy="rank"    -> rank_candidates, return top
@@ -281,7 +340,20 @@ class BrickPipeline:
         """
         candidates: list[dict] = []
         for i in range(n):
-            sample = self.generate(caption, on_progress=None)
+            if (
+                max_bricks is None
+                and max_seconds is None
+                and stability_check_interval is None
+            ):
+                sample = self.generate(caption, on_progress=None)
+            else:
+                sample = self.generate(
+                    caption,
+                    on_progress=None,
+                    max_bricks=max_bricks,
+                    max_seconds=max_seconds,
+                    stability_check_interval=stability_check_interval,
+                )
             sample["bricks_parsed"] = parse_brick_sequence(sample["bricks"])
             # Stamp the sample's original index so we don't have to recover it
             # via value-equality on mutated dicts later.
@@ -380,31 +452,56 @@ class MockBrickPipeline:
     """
 
     _HOUSE_BRICKS = [
-        # Base plate layer (z=0) — 4x2 footprint
+        # Base plate layer (z=0) — 4x4 footprint
         ("2x4", 0, 0, 0, "#237841"),
         ("2x4", 2, 0, 0, "#237841"),
         # Lower walls (z=1)
         ("2x4", 0, 0, 1, "#C91A09"),
         ("2x4", 2, 0, 1, "#C91A09"),
-        ("1x2", 0, 2, 1, "#C91A09"),
-        ("1x2", 3, 2, 1, "#C91A09"),
         # Upper walls (z=2)
         ("2x4", 0, 0, 2, "#FFFFFF"),
         ("2x4", 2, 0, 2, "#FFFFFF"),
         # Roof (z=3, z=4)
         ("2x4", 0, 0, 3, "#F2CD37"),
         ("2x4", 2, 0, 3, "#F2CD37"),
-        ("2x2", 1, 1, 4, "#6D6E5C"),
-        ("2x2", 2, 1, 4, "#6D6E5C"),
+        ("2x4", 0, 0, 4, "#6D6E5C"),
+        ("2x4", 2, 0, 4, "#6D6E5C"),
+        ("2x2", 0, 1, 5, "#6D6E5C"),
+        ("2x2", 2, 1, 5, "#6D6E5C"),
     ]
 
-    def generate(self, caption: str, on_progress=None) -> dict:
+    def generate(
+        self,
+        caption: str,
+        on_progress=None,
+        *,
+        max_bricks: int | None = None,
+        max_seconds: float | None = None,
+        stability_check_interval: int | None = None,
+    ) -> dict:
         t0 = time.time()
+        if max_bricks is not None and max_bricks < 0:
+            raise ValueError("max_bricks must be non-negative")
+        if max_seconds is not None and max_seconds < 0:
+            raise ValueError("max_seconds must be non-negative")
+        if stability_check_interval is not None and stability_check_interval <= 0:
+            raise ValueError("stability_check_interval must be positive")
+
         lines = []
-        for i, (dims, x, y, z, color) in enumerate(self._HOUSE_BRICKS):
+        hit_max_seconds = max_seconds == 0
+        limit = len(self._HOUSE_BRICKS) if max_bricks is None else min(max_bricks, len(self._HOUSE_BRICKS))
+        for i, (dims, x, y, z, color) in enumerate(self._HOUSE_BRICKS[:limit]):
+            if hit_max_seconds:
+                break
             lines.append(f"{dims} ({x},{y},{z}) {color}")
             if on_progress is not None:
                 on_progress({"type": "brick", "count": i + 1})
+        hit_max_bricks = max_bricks is not None and max_bricks < len(self._HOUSE_BRICKS)
+        termination_reason = "eos"
+        if hit_max_seconds:
+            termination_reason = "max_seconds"
+        elif hit_max_bricks:
+            termination_reason = "max_bricks"
         return {
             "bricks": "\n".join(lines),
             "brick_count": len(lines),
@@ -414,17 +511,38 @@ class MockBrickPipeline:
                 "generation_time_ms": max(1, int((time.time() - t0) * 1000)),
                 "rejections": 0,
                 "rollbacks": 0,
-                "termination_reason": "eos",
+                "termination_reason": termination_reason,
                 "final_stable": True,
                 "outlines_enabled": False,
                 "palette_validation_enabled": True,
                 "hit_max_rejections": False,
+                "hit_max_bricks": hit_max_bricks,
+                "hit_max_seconds": hit_max_seconds,
                 "hit_max_rollbacks": False,
+                "requested_max_bricks": max_bricks,
+                "requested_max_seconds": max_seconds,
+                "requested_stability_check_interval": stability_check_interval,
             },
         }
 
-    def generate_best_of_n(self, caption: str, n: int = 16, strategy: str = "rank", on_progress=None) -> dict:
-        result = self.generate(caption, on_progress=on_progress)
+    def generate_best_of_n(
+        self,
+        caption: str,
+        n: int = 16,
+        strategy: str = "rank",
+        on_progress=None,
+        *,
+        max_bricks: int | None = None,
+        max_seconds: float | None = None,
+        stability_check_interval: int | None = None,
+    ) -> dict:
+        result = self.generate(
+            caption,
+            on_progress=on_progress,
+            max_bricks=max_bricks,
+            max_seconds=max_seconds,
+            stability_check_interval=stability_check_interval,
+        )
         result.setdefault("metadata", {})
         result["metadata"]["n"] = n
         result["metadata"]["picked_index"] = 0

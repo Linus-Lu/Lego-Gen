@@ -99,3 +99,137 @@ def test_stable_only_benchmark_records_route_422(monkeypatch, reset_pipeline_sin
     assert rows[0]["status_code"] == 422
     assert rows[0]["success"] is False
     assert "stable" in rows[0]["detail"].lower()
+
+
+def test_run_core_benchmark_passes_generation_caps():
+    class StubPipeline:
+        def __init__(self):
+            self.calls = []
+
+        def generate(self, caption, on_progress=None, *, max_bricks=None, max_seconds=None, stability_check_interval=None):
+            self.calls.append({
+                "caption": caption,
+                "max_bricks": max_bricks,
+                "max_seconds": max_seconds,
+                "stability_check_interval": stability_check_interval,
+            })
+            return {
+                "bricks": "2x4 (0,0,0) #C91A09",
+                "brick_count": 1,
+                "stable": True,
+                "metadata": {
+                    "generation_time_ms": 1,
+                    "termination_reason": "max_bricks",
+                    "final_stable": True,
+                    "rejections": 0,
+                    "rollbacks": 0,
+                    "outlines_enabled": True,
+                    "palette_validation_enabled": True,
+                    "requested_max_bricks": max_bricks,
+                    "requested_max_seconds": max_seconds,
+                    "requested_stability_check_interval": stability_check_interval,
+                    "hit_max_bricks": True,
+                    "hit_max_seconds": False,
+                },
+            }
+
+    limits = bench._benchmark_limits(
+        quick_smoke=True,
+        max_bricks_per_sample=7,
+        sample_timeout_s=1.5,
+        stability_check_interval=3,
+    )
+    pipeline = StubPipeline()
+
+    rows = bench.run_core_benchmark(
+        pipeline,
+        ["a red house"],
+        run_mode="real",
+        limits=limits,
+    )
+
+    assert pipeline.calls == [{
+        "caption": "a red house",
+        "max_bricks": 7,
+        "max_seconds": 1.5,
+        "stability_check_interval": 3,
+    }]
+    assert rows[0]["quick_smoke"] is True
+    assert rows[0]["max_bricks_per_sample"] == 7
+    assert rows[0]["sample_timeout_s"] == 1.5
+    assert rows[0]["stability_check_interval"] == 3
+    assert rows[0]["requested_max_bricks"] == 7
+    assert rows[0]["hit_max_bricks"] is True
+
+
+def test_quick_smoke_writes_capped_report_and_config(tmp_path, monkeypatch):
+    from backend.inference import brick_pipeline as bp
+
+    class StubPipeline:
+        def generate(self, caption, on_progress=None, *, max_bricks=None, max_seconds=None, stability_check_interval=None):
+            return {
+                "bricks": "2x4 (0,0,0) #C91A09",
+                "brick_count": 1,
+                "stable": True,
+                "metadata": {
+                    "generation_time_ms": 1,
+                    "termination_reason": "max_bricks",
+                    "final_stable": True,
+                    "rejections": 0,
+                    "rollbacks": 0,
+                    "outlines_enabled": True,
+                    "palette_validation_enabled": True,
+                    "requested_max_bricks": max_bricks,
+                    "requested_max_seconds": max_seconds,
+                    "requested_stability_check_interval": stability_check_interval,
+                    "hit_max_bricks": True,
+                    "hit_max_seconds": False,
+                },
+            }
+
+    prompts = tmp_path / "prompts.txt"
+    prompts.write_text("a red house\n", encoding="utf-8")
+    monkeypatch.setattr(bp, "get_brick_pipeline", lambda: StubPipeline())
+    monkeypatch.setattr(
+        bench,
+        "collect_environment_metadata",
+        lambda limits=None: {
+            "environment": {
+                "run_mode": "dev-mock",
+                "LEGOGEN_DEV_raw": "1",
+                "LEGOGEN_DEV_effective": True,
+            },
+            "git": {"commit": "test", "status_short": "", "dirty": False},
+            "benchmark_limits": limits,
+        },
+    )
+
+    run_dir = bench.run_benchmark(
+        prompts_path=prompts,
+        output_root=tmp_path / "runs",
+        timestamp="quick-smoke",
+        quick_smoke=True,
+    )
+
+    config = json.loads((run_dir / "benchmark_config.json").read_text(encoding="utf-8"))
+    assert config["quick_smoke"] is True
+    assert config["modes"] == ["core", "export"]
+    assert config["limit_prompts"] == 1
+    assert config["max_bricks_per_sample"] == 24
+    assert config["sample_timeout_s"] == 90.0
+    assert config["stability_check_interval"] == 8
+
+    core_rows = [
+        json.loads(line)
+        for line in (run_dir / "core_raw.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert core_rows[0]["success"] is True
+    assert core_rows[0]["quick_smoke"] is True
+    assert core_rows[0]["max_bricks_per_sample"] == 24
+    assert core_rows[0]["parse_valid"] is True
+    assert core_rows[0]["collision_free"] is True
+    assert core_rows[0]["export_success"] is True
+
+    report = (run_dir / "benchmark_report.md").read_text(encoding="utf-8")
+    assert "capped smoke run" in report
+    assert "not a full performance measurement" in report

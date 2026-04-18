@@ -46,6 +46,11 @@ DEFAULT_NS = [1, 2, 4, 8, 16]
 DEFAULT_PROMPTS = PROJECT_ROOT / "benchmarks" / "prompts" / "core_prompts.txt"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "benchmark_runs"
 ALL_MODES = ("core", "bon", "stable-only", "export")
+QUICK_SMOKE_MODES = ("core", "export")
+QUICK_SMOKE_LIMIT_PROMPTS = 1
+QUICK_SMOKE_MAX_BRICKS = 24
+QUICK_SMOKE_SAMPLE_TIMEOUT_S = 90.0
+QUICK_SMOKE_STABILITY_CHECK_INTERVAL = 8
 
 
 def _now_timestamp() -> str:
@@ -73,6 +78,57 @@ def _rate(values: Iterable[Any]) -> float:
     if not vals:
         return 0.0
     return round(sum(1 for v in vals if bool(v)) / len(vals), 6)
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be positive")
+    return parsed
+
+
+def _benchmark_limits(
+    *,
+    quick_smoke: bool,
+    max_bricks_per_sample: int | None,
+    sample_timeout_s: float | None,
+    stability_check_interval: int | None,
+) -> dict[str, Any]:
+    capped_generation = any(
+        value is not None
+        for value in (max_bricks_per_sample, sample_timeout_s, stability_check_interval)
+    )
+    return {
+        "quick_smoke": quick_smoke,
+        "capped_generation": capped_generation,
+        "max_bricks_per_sample": max_bricks_per_sample,
+        "sample_timeout_s": sample_timeout_s,
+        "stability_check_interval": stability_check_interval,
+    }
+
+
+def _limit_row_fields(limits: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "quick_smoke": limits["quick_smoke"],
+        "capped_generation": limits["capped_generation"],
+        "max_bricks_per_sample": limits["max_bricks_per_sample"],
+        "sample_timeout_s": limits["sample_timeout_s"],
+        "stability_check_interval": limits["stability_check_interval"],
+    }
+
+
+def _has_generation_limits(limits: dict[str, Any]) -> bool:
+    return any(
+        limits[key] is not None
+        for key in ("max_bricks_per_sample", "sample_timeout_s", "stability_check_interval")
+    )
 
 
 def _json_default(value: Any) -> str:
@@ -130,7 +186,7 @@ def _run_git(args: list[str]) -> str | None:
     return proc.stdout.strip()
 
 
-def collect_environment_metadata() -> dict[str, Any]:
+def collect_environment_metadata(benchmark_limits: dict[str, Any] | None = None) -> dict[str, Any]:
     torch_meta: dict[str, Any]
     try:
         import torch
@@ -159,7 +215,7 @@ def collect_environment_metadata() -> dict[str, Any]:
         }
 
     status_short = _run_git(["status", "--short"])
-    return {
+    metadata = {
         "timestamp_local": datetime.now().isoformat(timespec="seconds"),
         "project_root": str(PROJECT_ROOT),
         "python": {
@@ -192,6 +248,9 @@ def collect_environment_metadata() -> dict[str, Any]:
             "available": importlib.util.find_spec("outlines") is not None,
         },
     }
+    if benchmark_limits is not None:
+        metadata["benchmark_limits"] = benchmark_limits
+    return metadata
 
 
 def real_skip_reason(metadata: dict[str, Any], *, allow_base_model: bool = False) -> str | None:
@@ -305,7 +364,19 @@ def validate_bricks_text(bricks_text: str, *, title: str = "LEGOGen Benchmark") 
     }
 
 
-def run_core_benchmark(pipeline: Any, prompts: list[str], *, run_mode: str) -> list[dict[str, Any]]:
+def run_core_benchmark(
+    pipeline: Any,
+    prompts: list[str],
+    *,
+    run_mode: str,
+    limits: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    limits = limits or _benchmark_limits(
+        quick_smoke=False,
+        max_bricks_per_sample=None,
+        sample_timeout_s=None,
+        stability_check_interval=None,
+    )
     rows: list[dict[str, Any]] = []
     for idx, prompt in enumerate(prompts, start=1):
         row: dict[str, Any] = {
@@ -314,10 +385,19 @@ def run_core_benchmark(pipeline: Any, prompts: list[str], *, run_mode: str) -> l
             "prompt_id": idx,
             "prompt": prompt,
             "success": False,
+            **_limit_row_fields(limits),
         }
         start = time.perf_counter()
         try:
-            result = pipeline.generate(prompt)
+            if _has_generation_limits(limits):
+                result = pipeline.generate(
+                    prompt,
+                    max_bricks=limits["max_bricks_per_sample"],
+                    max_seconds=limits["sample_timeout_s"],
+                    stability_check_interval=limits["stability_check_interval"],
+                )
+            else:
+                result = pipeline.generate(prompt)
             wall_time_ms = _elapsed_ms(start)
             metadata = result.get("metadata", {}) or {}
             checks = validate_bricks_text(result.get("bricks", ""), title=f"core-{idx}")
@@ -333,6 +413,11 @@ def run_core_benchmark(pipeline: Any, prompts: list[str], *, run_mode: str) -> l
                 "rollbacks": metadata.get("rollbacks"),
                 "outlines_enabled": metadata.get("outlines_enabled"),
                 "palette_validation_enabled": metadata.get("palette_validation_enabled"),
+                "requested_max_bricks": metadata.get("requested_max_bricks"),
+                "requested_max_seconds": metadata.get("requested_max_seconds"),
+                "requested_stability_check_interval": metadata.get("requested_stability_check_interval"),
+                "hit_max_bricks": metadata.get("hit_max_bricks"),
+                "hit_max_seconds": metadata.get("hit_max_seconds"),
                 "metadata": metadata,
                 "bricks": result.get("bricks", ""),
                 **checks,
@@ -354,7 +439,14 @@ def run_bon_benchmark(
     ns: list[int],
     strategy: str,
     run_mode: str,
+    limits: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    limits = limits or _benchmark_limits(
+        quick_smoke=False,
+        max_bricks_per_sample=None,
+        sample_timeout_s=None,
+        stability_check_interval=None,
+    )
     rows: list[dict[str, Any]] = []
     for idx, prompt in enumerate(prompts, start=1):
         for n in ns:
@@ -366,10 +458,21 @@ def run_bon_benchmark(
                 "n": n,
                 "strategy": strategy,
                 "success": False,
+                **_limit_row_fields(limits),
             }
             start = time.perf_counter()
             try:
-                result = pipeline.generate_best_of_n(prompt, n=n, strategy=strategy)
+                if _has_generation_limits(limits):
+                    result = pipeline.generate_best_of_n(
+                        prompt,
+                        n=n,
+                        strategy=strategy,
+                        max_bricks=limits["max_bricks_per_sample"],
+                        max_seconds=limits["sample_timeout_s"],
+                        stability_check_interval=limits["stability_check_interval"],
+                    )
+                else:
+                    result = pipeline.generate_best_of_n(prompt, n=n, strategy=strategy)
                 wall_time_ms = _elapsed_ms(start)
                 metadata = result.get("metadata", {}) or {}
                 checks = validate_bricks_text(result.get("bricks", ""), title=f"bon-{idx}-n{n}")
@@ -387,6 +490,11 @@ def run_bon_benchmark(
                     "rollbacks": metadata.get("rollbacks"),
                     "outlines_enabled": metadata.get("outlines_enabled"),
                     "palette_validation_enabled": metadata.get("palette_validation_enabled"),
+                    "requested_max_bricks": metadata.get("requested_max_bricks"),
+                    "requested_max_seconds": metadata.get("requested_max_seconds"),
+                    "requested_stability_check_interval": metadata.get("requested_stability_check_interval"),
+                    "hit_max_bricks": metadata.get("hit_max_bricks"),
+                    "hit_max_seconds": metadata.get("hit_max_seconds"),
                     "metadata": metadata,
                     "bricks": result.get("bricks", ""),
                     **checks,
@@ -510,10 +618,17 @@ def run_export_benchmark(core_rows: list[dict[str, Any]], *, run_mode: str) -> l
     return rows
 
 
-def summarize_core(rows: list[dict[str, Any]], *, run_mode: str) -> list[dict[str, Any]]:
+def summarize_core(rows: list[dict[str, Any]], *, run_mode: str, limits: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    limits = limits or _benchmark_limits(
+        quick_smoke=False,
+        max_bricks_per_sample=None,
+        sample_timeout_s=None,
+        stability_check_interval=None,
+    )
     successes = [row for row in rows if row.get("success")]
     return [{
         "run_mode": run_mode,
+        **_limit_row_fields(limits),
         "prompt_count": len(rows),
         "success_count": len(successes),
         "success_rate": _rate(row.get("success") for row in rows),
@@ -529,16 +644,25 @@ def summarize_core(rows: list[dict[str, Any]], *, run_mode: str) -> list[dict[st
         "avg_generation_time_ms": _safe_mean(row.get("generation_time_ms") for row in successes),
         "avg_rejections": _safe_mean(row.get("rejections") for row in successes),
         "avg_rollbacks": _safe_mean(row.get("rollbacks") for row in successes),
+        "hit_max_bricks_rate": _rate(row.get("hit_max_bricks") for row in successes),
+        "hit_max_seconds_rate": _rate(row.get("hit_max_seconds") for row in successes),
     }]
 
 
-def summarize_bon(rows: list[dict[str, Any]], *, ns: list[int]) -> list[dict[str, Any]]:
+def summarize_bon(rows: list[dict[str, Any]], *, ns: list[int], limits: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    limits = limits or _benchmark_limits(
+        quick_smoke=False,
+        max_bricks_per_sample=None,
+        sample_timeout_s=None,
+        stability_check_interval=None,
+    )
     summary: list[dict[str, Any]] = []
     for n in ns:
         subset = [row for row in rows if row.get("n") == n]
         successes = [row for row in subset if row.get("success")]
         summary.append({
             "n": n,
+            **_limit_row_fields(limits),
             "prompt_count": len(subset),
             "success_count": len(successes),
             "success_rate": _rate(row.get("success") for row in subset),
@@ -551,6 +675,8 @@ def summarize_bon(rows: list[dict[str, Any]], *, ns: list[int]) -> list[dict[str
             "avg_wall_time_ms": _safe_mean(row.get("wall_time_ms") for row in successes),
             "p50_wall_time_ms": _safe_p50(row.get("wall_time_ms") for row in successes),
             "avg_generation_time_ms": _safe_mean(row.get("generation_time_ms") for row in successes),
+            "hit_max_bricks_rate": _rate(row.get("hit_max_bricks") for row in successes),
+            "hit_max_seconds_rate": _rate(row.get("hit_max_seconds") for row in successes),
         })
     return summary
 
@@ -584,16 +710,23 @@ def summarize_export(rows: list[dict[str, Any]], *, run_mode: str) -> list[dict[
     }]
 
 
-def _write_empty_outputs(run_dir: Path, modes: tuple[str, ...], *, run_mode: str, ns: list[int]) -> dict[str, list[dict[str, Any]]]:
+def _write_empty_outputs(
+    run_dir: Path,
+    modes: tuple[str, ...],
+    *,
+    run_mode: str,
+    ns: list[int],
+    limits: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
     summaries: dict[str, list[dict[str, Any]]] = {}
     if "core" in modes:
         _write_jsonl(run_dir / "core_raw.jsonl", [])
-        summaries["core"] = summarize_core([], run_mode=run_mode)
+        summaries["core"] = summarize_core([], run_mode=run_mode, limits=limits)
         _write_csv(run_dir / "core_summary.csv", summaries["core"], list(summaries["core"][0].keys()))
         _write_summary_md(run_dir / "core_summary.md", "Core Benchmark Summary", "No core rows were run.", summaries["core"], list(summaries["core"][0].keys()))
     if "bon" in modes:
         _write_jsonl(run_dir / "bon_raw.jsonl", [])
-        summaries["bon"] = summarize_bon([], ns=ns)
+        summaries["bon"] = summarize_bon([], ns=ns, limits=limits)
         _write_csv(run_dir / "bon_summary.csv", summaries["bon"], list(summaries["bon"][0].keys()) if summaries["bon"] else ["n"])
         _write_summary_md(run_dir / "bon_summary.md", "Best-of-N Benchmark Summary", "No Best-of-N rows were run.", summaries["bon"], list(summaries["bon"][0].keys()) if summaries["bon"] else ["n"])
     if "stable-only" in modes:
@@ -616,6 +749,7 @@ def write_report(
     prompt_count: int,
     modes: tuple[str, ...],
     summaries: dict[str, list[dict[str, Any]]],
+    limits: dict[str, Any],
     skip_reason: str | None = None,
     plot_paths: list[Path] | None = None,
 ) -> None:
@@ -631,6 +765,16 @@ def write_report(
     ]
     if run_mode == "dev-mock":
         lines.append("- Note: this is a dev/mock smoke result, not a real performance measurement.")
+    if limits["quick_smoke"]:
+        lines.append("- Note: this is a capped smoke run, not a full performance measurement.")
+    elif limits["capped_generation"]:
+        lines.append("- Note: generation caps are enabled; this is not a full uncapped performance measurement.")
+    if limits["capped_generation"]:
+        lines.extend([
+            f"- Max bricks per sample: `{limits['max_bricks_per_sample']}`",
+            f"- Sample timeout seconds: `{limits['sample_timeout_s']}`",
+            f"- Stability check interval: `{limits['stability_check_interval']}`",
+        ])
     if skip_reason:
         lines.extend(["", f"Benchmark generation was skipped: {skip_reason}"])
     for name in ("core", "bon", "stable-only", "export"):
@@ -657,8 +801,29 @@ def run_benchmark(
     bon_ns: list[int] | None = None,
     bon_strategy: str = "cluster",
     allow_base_model: bool = False,
+    quick_smoke: bool = False,
+    max_bricks_per_sample: int | None = None,
+    sample_timeout_s: float | None = None,
+    stability_check_interval: int | None = None,
 ) -> Path:
     bon_ns = bon_ns or DEFAULT_NS
+    if quick_smoke:
+        if modes == ALL_MODES:
+            modes = QUICK_SMOKE_MODES
+        if limit_prompts is None:
+            limit_prompts = QUICK_SMOKE_LIMIT_PROMPTS
+        if max_bricks_per_sample is None:
+            max_bricks_per_sample = QUICK_SMOKE_MAX_BRICKS
+        if sample_timeout_s is None:
+            sample_timeout_s = QUICK_SMOKE_SAMPLE_TIMEOUT_S
+        if stability_check_interval is None:
+            stability_check_interval = QUICK_SMOKE_STABILITY_CHECK_INTERVAL
+    limits = _benchmark_limits(
+        quick_smoke=quick_smoke,
+        max_bricks_per_sample=max_bricks_per_sample,
+        sample_timeout_s=sample_timeout_s,
+        stability_check_interval=stability_check_interval,
+    )
     timestamp = timestamp or _now_timestamp()
     run_dir = output_root / timestamp
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -672,22 +837,24 @@ def run_benchmark(
         "bon_ns": bon_ns,
         "bon_strategy": bon_strategy,
         "allow_base_model": allow_base_model,
+        **limits,
     }
     _write_json(run_dir / "benchmark_config.json", config)
 
-    metadata = collect_environment_metadata()
+    metadata = collect_environment_metadata(limits)
     _write_json(run_dir / "environment_metadata.json", metadata)
     run_mode = metadata["environment"]["run_mode"]
 
     skip_reason = real_skip_reason(metadata, allow_base_model=allow_base_model)
     if skip_reason:
-        summaries = _write_empty_outputs(run_dir, modes, run_mode=run_mode, ns=bon_ns)
+        summaries = _write_empty_outputs(run_dir, modes, run_mode=run_mode, ns=bon_ns, limits=limits)
         write_report(
             run_dir,
             metadata=metadata,
             prompt_count=len(prompts),
             modes=modes,
             summaries=summaries,
+            limits=limits,
             skip_reason=skip_reason,
         )
         return run_dir
@@ -698,13 +865,14 @@ def run_benchmark(
         pipeline = get_brick_pipeline()
     except Exception as exc:
         skip_reason = f"Could not initialize brick pipeline: {exc!r}"
-        summaries = _write_empty_outputs(run_dir, modes, run_mode=run_mode, ns=bon_ns)
+        summaries = _write_empty_outputs(run_dir, modes, run_mode=run_mode, ns=bon_ns, limits=limits)
         write_report(
             run_dir,
             metadata=metadata,
             prompt_count=len(prompts),
             modes=modes,
             summaries=summaries,
+            limits=limits,
             skip_reason=skip_reason,
         )
         return run_dir
@@ -713,15 +881,15 @@ def run_benchmark(
     core_rows: list[dict[str, Any]] = []
 
     if "core" in modes or "export" in modes:
-        core_rows = run_core_benchmark(pipeline, prompts, run_mode=run_mode)
+        core_rows = run_core_benchmark(pipeline, prompts, run_mode=run_mode, limits=limits)
         if "core" in modes:
             _write_jsonl(run_dir / "core_raw.jsonl", core_rows)
-            summaries["core"] = summarize_core(core_rows, run_mode=run_mode)
+            summaries["core"] = summarize_core(core_rows, run_mode=run_mode, limits=limits)
             _write_csv(run_dir / "core_summary.csv", summaries["core"], list(summaries["core"][0].keys()))
             _write_summary_md(
                 run_dir / "core_summary.md",
                 "Core Benchmark Summary",
-                "n=1 text generation through the current BrickPipeline.generate path.",
+                "n=1 text generation through the current BrickPipeline.generate path. Capped runs are smoke tests, not full performance results.",
                 summaries["core"],
                 list(summaries["core"][0].keys()),
             )
@@ -733,14 +901,15 @@ def run_benchmark(
             ns=bon_ns,
             strategy=bon_strategy,
             run_mode=run_mode,
+            limits=limits,
         )
         _write_jsonl(run_dir / "bon_raw.jsonl", bon_rows)
-        summaries["bon"] = summarize_bon(bon_rows, ns=bon_ns)
+        summaries["bon"] = summarize_bon(bon_rows, ns=bon_ns, limits=limits)
         _write_csv(run_dir / "bon_summary.csv", summaries["bon"], list(summaries["bon"][0].keys()))
         _write_summary_md(
             run_dir / "bon_summary.md",
             "Best-of-N Benchmark Summary",
-            "Calls BrickPipeline.generate_best_of_n for each prompt and n.",
+            "Calls BrickPipeline.generate_best_of_n for each prompt and n. Capped runs are smoke tests, not full performance results.",
             summaries["bon"],
             list(summaries["bon"][0].keys()),
         )
@@ -786,6 +955,7 @@ def run_benchmark(
         prompt_count=len(prompts),
         modes=modes,
         summaries=summaries,
+        limits=limits,
         plot_paths=plot_paths,
     )
     return run_dir
@@ -809,17 +979,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT, help="Directory that will contain <timestamp> run folders.")
     parser.add_argument("--timestamp", type=str, default=None, help="Run directory name. Defaults to local YYYYmmdd_HHMMSS.")
     parser.add_argument("--limit-prompts", type=int, default=None, help="Use the first N prompts only, useful for smoke runs.")
-    parser.add_argument("--modes", nargs="+", default=["all"], help="Modes to run: all, core, bon, stable-only, export.")
+    parser.add_argument("--modes", nargs="+", default=None, help="Modes to run: all, core, bon, stable-only, export.")
     parser.add_argument("--bon-ns", type=int, nargs="+", default=DEFAULT_NS, help="Best-of-N values to sweep.")
     parser.add_argument("--bon-strategy", choices=["rank", "cluster"], default="cluster", help="Selection strategy passed to generate_best_of_n.")
     parser.add_argument("--allow-base-model", action="store_true", help="Allow LEGOGEN_DEV=0 runs without the Stage 2 LoRA adapter present.")
+    parser.add_argument("--quick-smoke", action="store_true", help="Run a capped core+export smoke benchmark, not a full performance run.")
+    parser.add_argument("--max-bricks-per-sample", type=_positive_int, default=None, help="Cap each generated sample to this many bricks.")
+    parser.add_argument("--sample-timeout-s", type=_positive_float, default=None, help="Cooperative timeout for each generated sample.")
+    parser.add_argument("--stability-check-interval", type=_positive_int, default=None, help="Check stability and rollback every N accepted bricks.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
-    modes = _parse_modes(args.modes)
+    mode_values = args.modes or (list(QUICK_SMOKE_MODES) if args.quick_smoke else ["all"])
+    modes = _parse_modes(mode_values)
     run_dir = run_benchmark(
         prompts_path=args.prompts,
         output_root=args.output_root,
@@ -829,6 +1004,10 @@ def main(argv: list[str] | None = None) -> int:
         bon_ns=args.bon_ns,
         bon_strategy=args.bon_strategy,
         allow_base_model=args.allow_base_model,
+        quick_smoke=args.quick_smoke,
+        max_bricks_per_sample=args.max_bricks_per_sample,
+        sample_timeout_s=args.sample_timeout_s,
+        stability_check_interval=args.stability_check_interval,
     )
     print(run_dir)
     return 0

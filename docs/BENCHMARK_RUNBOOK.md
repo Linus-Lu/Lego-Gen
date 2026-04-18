@@ -55,6 +55,19 @@ Real benchmarking requires CUDA and the Stage 2 brick LoRA adapter at
 The harness records Stage 1 checkpoint metadata too, but the benchmark itself
 is text-only and does not run the image-to-caption model.
 
+For a fast real-GPU sanity check, run the capped quick smoke first. It measures
+validity and exportability, not full model performance:
+
+```bash
+LEGOGEN_DEV=0 .venv/bin/python scripts/benchmark_legogen.py \
+  --quick-smoke
+```
+
+`--quick-smoke` is shorthand for core plus export on one prompt with
+`--max-bricks-per-sample 24`, `--sample-timeout-s 90`, and
+`--stability-check-interval 8`. Reports from capped runs are labeled as smoke
+results and must not be compared to full uncapped performance numbers.
+
 ```bash
 LEGOGEN_DEV=0 .venv/bin/python scripts/benchmark_legogen.py
 ```
@@ -89,7 +102,8 @@ Core raw rows record:
 ```text
 wall_time_ms, generation_time_ms, brick_count, stable, final_stable,
 termination_reason, rejections, rollbacks, outlines_enabled,
-palette_validation_enabled
+palette_validation_enabled, requested_max_bricks, requested_max_seconds,
+requested_stability_check_interval, hit_max_bricks, hit_max_seconds
 ```
 
 The harness independently recomputes:

@@ -240,7 +240,12 @@ class TestGenerateLoop:
         assert "outlines_enabled" in result["metadata"]
         assert "palette_validation_enabled" in result["metadata"]
         assert "hit_max_rejections" in result["metadata"]
+        assert "hit_max_bricks" in result["metadata"]
+        assert "hit_max_seconds" in result["metadata"]
         assert "hit_max_rollbacks" in result["metadata"]
+        assert "requested_max_bricks" in result["metadata"]
+        assert "requested_max_seconds" in result["metadata"]
+        assert "requested_stability_check_interval" in result["metadata"]
 
     def test_rejections_counted(self):
         from backend.brick.parser import Brick
@@ -258,6 +263,41 @@ class TestGenerateLoop:
         result = pipeline.generate("test")
         assert result["metadata"]["termination_reason"] == "max_rejections"
         assert result["metadata"]["hit_max_rejections"] is True
+
+    def test_max_bricks_caps_generation_and_metadata(self):
+        from backend.brick.parser import Brick
+
+        pipeline = self._make_pipeline([
+            (Brick(2, 4, 0, 0, 0, "C91A09"), 0),
+            (Brick(2, 4, 0, 4, 0, "FFFFFF"), 0),
+            (None, 0),
+        ])
+
+        result = pipeline.generate("test", max_bricks=1)
+
+        assert result["brick_count"] == 1
+        assert result["metadata"]["termination_reason"] == "max_bricks"
+        assert result["metadata"]["hit_max_bricks"] is True
+        assert result["metadata"]["requested_max_bricks"] == 1
+
+    def test_max_seconds_caps_after_slow_step_and_metadata(self):
+        import time
+        from backend.brick.parser import Brick
+
+        pipeline = self._make_pipeline([])
+
+        def slow_generate_one(input_ids, grid, logits_processor=None):
+            time.sleep(0.01)
+            return Brick(2, 4, 0, 0, 0, "C91A09"), 0, None
+
+        pipeline._generate_one_brick = slow_generate_one
+
+        result = pipeline.generate("test", max_seconds=0.001)
+
+        assert result["brick_count"] == 1
+        assert result["metadata"]["termination_reason"] == "max_seconds"
+        assert result["metadata"]["hit_max_seconds"] is True
+        assert result["metadata"]["requested_max_seconds"] == 0.001
 
 
 def test_mock_generate_best_of_n_returns_valid_shape():
