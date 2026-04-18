@@ -3,7 +3,11 @@ from backend.brick.ldraw import export_ldr
 from backend.brick.parser import Brick
 
 
-def test_export_ldr_emits_header_and_part_lines():
+def test_export_ldr_emits_header_and_part_lines(tmp_path, monkeypatch):
+    colors = tmp_path / "colors.json"
+    colors.write_text('{"4":{"rgb":"C91A09","is_trans":false}}', encoding="utf-8")
+    monkeypatch.setattr(ldraw, "_COLORS_JSON", colors)
+
     out = export_ldr(
         [Brick(h=2, w=4, x=0, y=0, z=0, color="C91A09")],
         title="Test Build",

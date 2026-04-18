@@ -291,6 +291,15 @@ class TestGallery:
         )
         assert resp.status_code == 400
 
+    def test_validated_bricks_rejects_empty_sequence_directly(self):
+        from fastapi import HTTPException
+        from backend.api.routes_gallery import _validated_bricks
+
+        with pytest.raises(HTTPException) as excinfo:
+            _validated_bricks(" \n ")
+        assert excinfo.value.status_code == 400
+        assert "must not be empty" in excinfo.value.detail
+
     def test_invalid_brick_text_rejected(self, client):
         resp = client.post(
             "/api/gallery",
@@ -511,6 +520,34 @@ class TestCancelToken:
         assert tok.is_set is True
         with pytest.raises(_Cancelled):
             tok.check_callback({"type": "brick"})
+
+
+class TestCallWithSupportedKwargs:
+    def test_helper_keeps_kwargs_when_signature_is_unavailable(self, monkeypatch):
+        from backend.api import routes_generate as rg
+
+        monkeypatch.setattr(
+            rg.inspect,
+            "signature",
+            lambda fn: (_ for _ in ()).throw(ValueError("boom")),
+        )
+
+        def target(*args, **kwargs):
+            return args, kwargs
+
+        args, kwargs = rg._call_with_supported_kwargs(target, 1, keep=2)
+        assert args == (1,)
+        assert kwargs == {"keep": 2}
+
+    def test_helper_preserves_var_keyword_functions(self):
+        from backend.api import routes_generate as rg
+
+        def target(*args, **kwargs):
+            return args, kwargs
+
+        args, kwargs = rg._call_with_supported_kwargs(target, 1, keep=2, extra=3)
+        assert args == (1,)
+        assert kwargs == {"keep": 2, "extra": 3}
 
 
 class TestStreamImageBestOfN:
