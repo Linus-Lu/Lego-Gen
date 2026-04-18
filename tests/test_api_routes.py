@@ -506,6 +506,38 @@ class TestDecodeImageFallback:
             rg._decode_image(b"not-a-real-png")
         assert excinfo.value.status_code == 400
 
+    def test_generate_bricks_image_path_works_in_prod_with_stubbed_pipeline(self, monkeypatch, client):
+        from backend.api import routes_generate as rg
+
+        seen = {}
+
+        class StubPipeline:
+            def generate_from_image(self, image, on_progress=None, *, should_cancel=None):
+                seen["image_size"] = image.size
+                seen["on_progress"] = on_progress
+                seen["should_cancel"] = should_cancel
+                return {
+                    "bricks": "2x4 (0,0,0) #C91A09",
+                    "caption": "prod caption",
+                    "brick_count": 1,
+                    "stable": True,
+                    "metadata": {"model_version": "stub-prod"},
+                }
+
+        monkeypatch.setattr(rg, "LEGOGEN_DEV", False)
+        monkeypatch.setattr(rg, "get_brick_pipeline", lambda: StubPipeline())
+
+        resp = client.post(
+            "/api/generate-bricks",
+            files={"image": ("prod.png", _make_png_bytes(), "image/png")},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["caption"] == "prod caption"
+        assert seen["image_size"] == (64, 64)
+        assert callable(seen["on_progress"])
+        assert callable(seen["should_cancel"])
+
 
 class TestCancelToken:
     def test_check_callback_raises_when_set(self):

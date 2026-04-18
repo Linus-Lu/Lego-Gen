@@ -8,6 +8,7 @@ Tests are split into:
 
 import re
 import sys
+import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -247,6 +248,114 @@ def test_call_with_supported_kwargs_preserves_var_keyword_functions():
     args, kwargs = _call_with_supported_kwargs(target, 1, keep=2, extra=3)
     assert args == (1,)
     assert kwargs == {"keep": 2, "extra": 3}
+
+
+@pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
+def test_brick_pipeline_init_wraps_base_model_with_adapter_when_present(monkeypatch, tmp_path):
+    import backend.inference.brick_pipeline as bp
+
+    adapter_dir = tmp_path / "brick-adapter"
+    adapter_dir.mkdir()
+    monkeypatch.setattr(bp, "BRICK_CHECKPOINT_DIR", adapter_dir)
+
+    fake_torch = types.ModuleType("torch")
+    fake_torch.bfloat16 = "bf16"
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    seen = {}
+    fake_tokenizer = object()
+    fake_base_model = MagicMock()
+    fake_peft_model = MagicMock()
+
+    class FakeBitsAndBytesConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(model_name, **kwargs):
+            seen["tokenizer"] = (model_name, kwargs)
+            return fake_tokenizer
+
+    class FakeAutoModelForCausalLM:
+        @staticmethod
+        def from_pretrained(model_name, **kwargs):
+            seen["model"] = (model_name, kwargs)
+            return fake_base_model
+
+    class FakePeftModel:
+        @staticmethod
+        def from_pretrained(base, path):
+            seen["adapter"] = (base, path)
+            return fake_peft_model
+
+    fake_transformers = types.ModuleType("transformers")
+    fake_transformers.AutoTokenizer = FakeAutoTokenizer
+    fake_transformers.AutoModelForCausalLM = FakeAutoModelForCausalLM
+    fake_transformers.BitsAndBytesConfig = FakeBitsAndBytesConfig
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    fake_peft = types.ModuleType("peft")
+    fake_peft.PeftModel = FakePeftModel
+    monkeypatch.setitem(sys.modules, "peft", fake_peft)
+
+    pipe = bp.BrickPipeline()
+
+    assert pipe.device == "cuda"
+    assert pipe.tokenizer is fake_tokenizer
+    assert pipe.model is fake_peft_model
+    fake_peft_model.eval.assert_called_once()
+    assert seen["tokenizer"] == (bp.BRICK_MODEL_NAME, {"trust_remote_code": True})
+    assert seen["model"][1]["device_map"] == "auto"
+    assert seen["model"][1]["torch_dtype"] == "bf16"
+    assert seen["model"][1]["quantization_config"].kwargs["load_in_4bit"] is True
+    assert seen["adapter"] == (fake_base_model, str(adapter_dir))
+
+
+@pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
+def test_generate_from_image_uses_stage1_caption_and_forwards_should_cancel(monkeypatch):
+    import backend.inference.brick_pipeline as bp
+
+    seen = {}
+
+    class StubStage1:
+        def describe(self, image, *, should_cancel=None):
+            seen["stage1_image"] = image
+            seen["stage1_should_cancel"] = should_cancel
+            return "caption from stage1"
+
+    def fake_generate(caption, on_progress=None, should_cancel=None):
+        seen["caption"] = caption
+        seen["on_progress"] = on_progress
+        seen["generate_should_cancel"] = should_cancel
+        return {
+            "bricks": "2x4 (0,0,0) #C91A09",
+            "brick_count": 1,
+            "stable": True,
+            "metadata": {"model_version": "stub"},
+        }
+
+    pipe = bp.BrickPipeline.__new__(bp.BrickPipeline)
+    pipe.generate = fake_generate
+    monkeypatch.setattr(bp, "_get_stage1_pipeline", lambda: StubStage1())
+
+    events = []
+    image = object()
+    should_cancel = lambda: False
+
+    result = pipe.generate_from_image(
+        image,
+        on_progress=events.append,
+        should_cancel=should_cancel,
+    )
+
+    assert result["caption"] == "caption from stage1"
+    assert seen["stage1_image"] is image
+    assert seen["stage1_should_cancel"] is should_cancel
+    assert seen["caption"] == "caption from stage1"
+    assert callable(seen["on_progress"])
+    assert seen["generate_should_cancel"] is should_cancel
+    assert events == [{"type": "caption", "caption": "caption from stage1"}]
 
 
 

@@ -4,6 +4,7 @@ The real BrickPipeline is pragma'd; the mock path is the one the API exercises
 under LEGOGEN_DEV=1, so its behavior is worth pinning explicitly."""
 
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -96,3 +97,40 @@ def test_get_stage1_pipeline_returns_singleton(reset_pipeline_singletons):
     b = bp._get_stage1_pipeline()
     assert a is b
     assert isinstance(a, _MockStage1)
+
+
+def test_get_brick_pipeline_returns_real_singleton_in_prod(monkeypatch, reset_pipeline_singletons):
+    monkeypatch.setattr(bp, "LEGOGEN_DEV", False)
+
+    created = []
+
+    class FakeBrickPipeline:
+        def __init__(self):
+            created.append(self)
+
+    monkeypatch.setattr(bp, "BrickPipeline", FakeBrickPipeline)
+
+    a = bp.get_brick_pipeline()
+    b = bp.get_brick_pipeline()
+
+    assert a is b
+    assert isinstance(a, FakeBrickPipeline)
+    assert len(created) == 1
+
+
+def test_get_stage1_pipeline_returns_real_singleton_in_prod(monkeypatch, reset_pipeline_singletons):
+    monkeypatch.setattr(bp, "LEGOGEN_DEV", False)
+
+    fake_stage1_module = types.ModuleType("backend.inference.stage1_pipeline")
+
+    class FakeStage1Pipeline:
+        pass
+
+    fake_stage1_module.Stage1Pipeline = FakeStage1Pipeline
+    monkeypatch.setitem(sys.modules, "backend.inference.stage1_pipeline", fake_stage1_module)
+
+    a = bp._get_stage1_pipeline()
+    b = bp._get_stage1_pipeline()
+
+    assert a is b
+    assert isinstance(a, FakeStage1Pipeline)

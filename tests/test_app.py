@@ -74,3 +74,33 @@ def test_lifespan_dev_mode_runs(capsys, gallery_db_path):
     out = capsys.readouterr().out
     assert "dev mode" in out.lower()
     assert "preloading" not in out.lower()
+
+
+def test_lifespan_prod_mode_preloads_models(monkeypatch, capsys, gallery_db_path):
+    monkeypatch.setenv("LEGOGEN_DEV", "0")
+    import backend.app
+
+    importlib.reload(backend.app)
+    preload_calls = []
+    monkeypatch.setattr(backend.app, "_preload_models", lambda: preload_calls.append("preload"))
+
+    with TestClient(backend.app.app):
+        pass
+
+    out = capsys.readouterr().out.lower()
+    assert preload_calls == ["preload"]
+    assert "preloading models" in out
+    assert "models loaded" in out
+
+
+def test_preload_models_calls_both_factories(monkeypatch):
+    import backend.app as app_mod
+    import backend.inference.brick_pipeline as bp
+
+    calls = []
+    monkeypatch.setattr(bp, "get_brick_pipeline", lambda: calls.append("brick") or object())
+    monkeypatch.setattr(bp, "_get_stage1_pipeline", lambda: calls.append("stage1") or object())
+
+    app_mod._preload_models()
+
+    assert calls == ["brick", "stage1"]
