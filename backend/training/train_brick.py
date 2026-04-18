@@ -7,10 +7,13 @@ Features ported from train_unified.py:
 """
 
 import argparse
+import hashlib
 import inspect
 import json
+import shutil
 import sys
 from pathlib import Path
+from contextlib import nullcontext
 
 import torch
 import torch.nn.functional as F
@@ -18,7 +21,7 @@ import torch.nn.functional as F
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from datasets import concatenate_datasets, load_dataset
+from datasets import DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 from peft import LoraConfig, get_peft_model
 from transformers import (
     AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer,
@@ -32,6 +35,11 @@ try:
 except ImportError:
     SFTConfig = None
 
+try:
+    from filelock import FileLock
+except ImportError:  # pragma: no cover - transformers normally depends on it
+    FileLock = None
+
 from backend.config import (
     BRICK_MODEL_NAME, BRICK_CHECKPOINT_DIR, BRICK_LEARNING_RATE,
     BRICK_BATCH_SIZE, BRICK_GRADIENT_ACCUMULATION, BRICK_MAX_SEQ_LENGTH,
@@ -42,6 +50,8 @@ from backend.config import (
 LOSS_CHUNK_TOKENS = 1024
 DEFAULT_EVAL_SAMPLES = 512
 DEFAULT_SEED = 42
+TOKENIZED_CACHE_VERSION = 1
+CACHE_METADATA_FILE = "legogen_tokenized_cache.json"
 
 
 # ── Structure-aware loss for brick format ─────────────────────────────────
@@ -194,6 +204,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Move eval outputs to CPU this often when supported")
     parser.add_argument("--dataloader-num-workers", type=int, default=4,
                         help="Training dataloader worker processes")
+    parser.add_argument("--tokenized-cache-dir", type=Path, default=None,
+                        help="Directory for reusable tokenized datasets; defaults to <data-dir>/.tokenized_cache")
+    parser.add_argument("--rebuild-tokenized-cache", action="store_true",
+                        help="Rebuild the matching tokenized dataset cache entry")
+    parser.add_argument("--no-tokenized-cache", action="store_true",
+                        help="Disable pre-tokenization cache and let SFTTrainer tokenize every run")
+    parser.add_argument("--no-gradient-checkpointing", action="store_true",
+                        help="Disable gradient checkpointing; faster but uses more VRAM")
     parser.add_argument("--save-total-limit", type=int, default=5,
                         help="How many recent checkpoints to retain")
     parser.add_argument("--no-wandb", action="store_true",
@@ -266,6 +284,155 @@ def _select_dataset_subset(
     return subset
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _tokenized_cache_root(data_dir: Path, explicit_cache_dir: Path | None) -> Path:
+    return explicit_cache_dir if explicit_cache_dir is not None else data_dir / ".tokenized_cache"
+
+
+def _tokenizer_fingerprint(tokenizer) -> dict:
+    chat_template = getattr(tokenizer, "chat_template", None) or ""
+    return {
+        "name_or_path": getattr(tokenizer, "name_or_path", ""),
+        "class": tokenizer.__class__.__name__,
+        "vocab_size": len(tokenizer),
+        "eos_token_id": getattr(tokenizer, "eos_token_id", None),
+        "pad_token_id": getattr(tokenizer, "pad_token_id", None),
+        "chat_template_sha256": hashlib.sha256(chat_template.encode("utf-8")).hexdigest(),
+    }
+
+
+def _tokenized_cache_metadata(
+    *,
+    train_path: Path,
+    test_path: Path,
+    tokenizer,
+    train_samples: int | None,
+    eval_samples: int | None,
+    train_include_tail: int,
+) -> dict:
+    return {
+        "version": TOKENIZED_CACHE_VERSION,
+        "model_name": BRICK_MODEL_NAME,
+        "tokenizer": _tokenizer_fingerprint(tokenizer),
+        "train_file": {
+            "path": str(train_path.resolve()),
+            "sha256": _file_sha256(train_path),
+        },
+        "test_file": {
+            "path": str(test_path.resolve()),
+            "sha256": _file_sha256(test_path),
+        },
+        "selection": {
+            "seed": DEFAULT_SEED,
+            "train_samples": train_samples,
+            "eval_seed": DEFAULT_SEED + 1,
+            "eval_samples": eval_samples,
+            "train_include_tail": train_include_tail,
+        },
+        "format": {
+            "source_column": "messages",
+            "tokenizer_call": "apply_chat_template(tokenize=True, return_dict=True)",
+        },
+    }
+
+
+def _tokenized_cache_key(metadata: dict) -> str:
+    payload = json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:24]
+
+
+def _metadata_matches(cache_dir: Path, metadata: dict) -> bool:
+    metadata_path = cache_dir / CACHE_METADATA_FILE
+    if not metadata_path.exists():
+        return False
+    try:
+        return json.loads(metadata_path.read_text(encoding="utf-8")) == metadata
+    except json.JSONDecodeError:
+        return False
+
+
+def _cache_lock(path: Path):
+    if FileLock is None:
+        return nullcontext()
+    return FileLock(str(path))
+
+
+def _unwrap_tokenizer_output(value):
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if value and isinstance(value[0], list):
+        return value[0]
+    return value
+
+
+def _tokenize_chat_dataset(dataset, tokenizer, *, name: str):
+    def tokenize_example(example):
+        processed = tokenizer.apply_chat_template(
+            example["messages"],
+            tokenize=True,
+            return_dict=True,
+        )
+        output = {"input_ids": _unwrap_tokenizer_output(processed["input_ids"])}
+        if "assistant_masks" in processed:
+            output["assistant_masks"] = _unwrap_tokenizer_output(processed["assistant_masks"])
+        return output
+
+    return dataset.map(
+        tokenize_example,
+        remove_columns=dataset.column_names,
+        desc=f"Tokenizing {name} dataset",
+    )
+
+
+def _load_or_create_tokenized_datasets(
+    *,
+    train_ds,
+    eval_ds,
+    tokenizer,
+    cache_root: Path,
+    metadata: dict,
+    rebuild: bool,
+):
+    cache_key = _tokenized_cache_key(metadata)
+    cache_dir = cache_root / cache_key
+    lock_path = cache_root / f"{cache_key}.lock"
+    cache_root.mkdir(parents=True, exist_ok=True)
+
+    with _cache_lock(lock_path):
+        if cache_dir.exists() and not rebuild and _metadata_matches(cache_dir, metadata):
+            print(f"Loading tokenized dataset cache: {cache_dir}", flush=True)
+            tokenized = load_from_disk(str(cache_dir))
+            return tokenized["train"], tokenized["eval"]
+
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir)
+
+        print(f"Building tokenized dataset cache: {cache_dir}", flush=True)
+        tokenized = DatasetDict({
+            "train": _tokenize_chat_dataset(train_ds, tokenizer, name="train"),
+            "eval": _tokenize_chat_dataset(eval_ds, tokenizer, name="eval"),
+        })
+
+        tmp_dir = cache_root / f".{cache_key}.tmp"
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        tokenized.save_to_disk(str(tmp_dir))
+        (tmp_dir / CACHE_METADATA_FILE).write_text(
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        tmp_dir.replace(cache_dir)
+        print(f"Saved tokenized dataset cache: {cache_dir}", flush=True)
+        return tokenized["train"], tokenized["eval"]
+
+
 def main() -> None:
     parser = build_arg_parser()
     # parse_args (not parse_known_args) so unknown flags surface as errors;
@@ -310,11 +477,53 @@ def main() -> None:
     print(f"TRL version: {trl.__version__}", flush=True)
     print(f"Transformers version: {transformers.__version__}", flush=True)
 
-    print(f"Loading model: {BRICK_MODEL_NAME}", flush=True)
+    print(f"Loading tokenizer: {BRICK_MODEL_NAME}", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(BRICK_MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    print("Loading datasets...", flush=True)
+    ds = load_dataset("json", data_files={
+        "train": str(train_path),
+        "test": str(test_path),
+    })
+
+    # NOTE: HF Trainer shuffles with RandomSampler / DistributedSampler every
+    # epoch, which destroys any prefix ordering — so we no longer pre-sort
+    # the dataset. ``apply_curriculum_ordering`` is still exported for callers
+    # that build their own DataLoader with ``shuffle=False``.
+    train_ds = _select_dataset_subset(
+        ds["train"],
+        args.train_samples,
+        seed=DEFAULT_SEED,
+        name="train",
+        include_tail=256 if args.train_samples is not None else 0,
+    )
+    eval_ds = _select_dataset_subset(
+        ds["test"], args.eval_samples, seed=DEFAULT_SEED + 1, name="eval"
+    )
+    if not args.no_tokenized_cache:
+        train_include_tail = 256 if args.train_samples is not None else 0
+        cache_metadata = _tokenized_cache_metadata(
+            train_path=train_path,
+            test_path=test_path,
+            tokenizer=tokenizer,
+            train_samples=args.train_samples,
+            eval_samples=args.eval_samples,
+            train_include_tail=train_include_tail,
+        )
+        train_ds, eval_ds = _load_or_create_tokenized_datasets(
+            train_ds=train_ds,
+            eval_ds=eval_ds,
+            tokenizer=tokenizer,
+            cache_root=_tokenized_cache_root(args.data_dir, args.tokenized_cache_dir),
+            metadata=cache_metadata,
+            rebuild=args.rebuild_tokenized_cache,
+        )
+    else:
+        print("Tokenized dataset cache disabled; SFTTrainer will tokenize datasets.", flush=True)
+
+    print(f"Loading model: {BRICK_MODEL_NAME}", flush=True)
     model = AutoModelForCausalLM.from_pretrained(
         BRICK_MODEL_NAME, torch_dtype="auto", trust_remote_code=True,
     )
@@ -337,29 +546,12 @@ def main() -> None:
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
-    model.gradient_checkpointing_enable()
-    model.enable_input_require_grads()
-
-    print("Loading datasets...", flush=True)
-    ds = load_dataset("json", data_files={
-        "train": str(train_path),
-        "test": str(test_path),
-    })
-
-    # NOTE: HF Trainer shuffles with RandomSampler / DistributedSampler every
-    # epoch, which destroys any prefix ordering — so we no longer pre-sort
-    # the dataset. ``apply_curriculum_ordering`` is still exported for callers
-    # that build their own DataLoader with ``shuffle=False``.
-    train_ds = _select_dataset_subset(
-        ds["train"],
-        args.train_samples,
-        seed=DEFAULT_SEED,
-        name="train",
-        include_tail=256 if args.train_samples is not None else 0,
-    )
-    eval_ds = _select_dataset_subset(
-        ds["test"], args.eval_samples, seed=DEFAULT_SEED + 1, name="eval"
-    )
+    gradient_checkpointing = not args.no_gradient_checkpointing
+    if gradient_checkpointing:
+        model.gradient_checkpointing_enable()
+        model.enable_input_require_grads()
+    else:
+        print("Gradient checkpointing disabled; expect higher VRAM use.", flush=True)
 
     # ── Structure-aware loss weights ─────────────────────────────────
     structure_weights = BrickStructureWeights(tokenizer)
@@ -380,8 +572,7 @@ def main() -> None:
         optim="adamw_torch",
         bf16=USE_BF16,
         fp16=not USE_BF16 and torch.cuda.is_available(),
-        gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
+        gradient_checkpointing=gradient_checkpointing,
         logging_steps=10,
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
@@ -398,6 +589,8 @@ def main() -> None:
         if args.max_steps <= 0:
             raise SystemExit("--max-steps must be positive")
         base_kwargs["max_steps"] = args.max_steps
+    if gradient_checkpointing:
+        base_kwargs["gradient_checkpointing_kwargs"] = {"use_reentrant": False}
 
     # Decide which config class to use
     ConfigClass = SFTConfig if SFTConfig is not None else TrainingArguments

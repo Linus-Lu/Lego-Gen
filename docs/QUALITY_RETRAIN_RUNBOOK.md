@@ -50,6 +50,12 @@ export BRICK_TRAINING_DATA=/root/autodl-tmp/Lego-Gen/data/brick_training_v2
   --no-wandb
 ```
 
+The first run with a new data/tokenizer/subset combination builds
+`data/brick_training_v2/.tokenized_cache/`. Later runs with the same settings
+load that cache and skip the expensive tokenization pass. Use
+`--rebuild-tokenized-cache` only when you intentionally want to regenerate the
+same cache key.
+
 Evaluate:
 
 ```bash
@@ -97,6 +103,11 @@ not turn into a full-test-set bottleneck every few hundred optimizer steps. Use
 the separate quality eval below for final checkpoint selection. On 8x5090, keep
 the effective batch close to the single-GPU default by using
 `--gradient-accumulation-steps 2`.
+
+On 96GB RTX PRO 6000 nodes, run a short speed/OOM test before full training with
+`--batch-size 2 --gradient-accumulation-steps 1 --no-gradient-checkpointing`.
+If that is stable, it should train faster than the 5090-safe checkpointing
+configuration.
 
 Evaluate promising checkpoints with both:
 

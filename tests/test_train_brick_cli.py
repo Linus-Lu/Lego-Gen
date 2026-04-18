@@ -35,6 +35,10 @@ def test_train_brick_parser_exposes_v2_controls(tmp_path):
         "20",
         "--gradient-accumulation-steps",
         "2",
+        "--tokenized-cache-dir",
+        str(tmp_path / "token-cache"),
+        "--rebuild-tokenized-cache",
+        "--no-gradient-checkpointing",
         "--no-wandb",
     ])
 
@@ -49,6 +53,9 @@ def test_train_brick_parser_exposes_v2_controls(tmp_path):
     assert args.save_steps == 200
     assert args.warmup_steps == 20
     assert args.gradient_accumulation_steps == 2
+    assert args.tokenized_cache_dir == tmp_path / "token-cache"
+    assert args.rebuild_tokenized_cache is True
+    assert args.no_gradient_checkpointing is True
     assert args.no_wandb is True
 
 
@@ -94,3 +101,85 @@ def test_select_dataset_subset_is_deterministic_and_bounded():
 
     with pytest.raises(SystemExit):
         train_brick._select_dataset_subset(ds, 0, seed=123, name="eval")
+
+
+class _TinyTokenizer:
+    name_or_path = "tiny-tokenizer"
+    chat_template = "tiny-template"
+    eos_token_id = 2
+    pad_token_id = 0
+
+    def __len__(self):
+        return 128
+
+    def apply_chat_template(self, messages, *, tokenize, return_dict):
+        assert tokenize is True
+        assert return_dict is True
+        text = "\n".join(f"{message['role']}:{message['content']}" for message in messages)
+        return {"input_ids": [(ord(char) % 97) + 3 for char in text]}
+
+
+def test_tokenized_cache_metadata_changes_with_data(tmp_path):
+    train_path = tmp_path / "train.jsonl"
+    test_path = tmp_path / "test.jsonl"
+    train_path.write_text('{"messages": []}\n', encoding="utf-8")
+    test_path.write_text('{"messages": []}\n', encoding="utf-8")
+
+    metadata_a = train_brick._tokenized_cache_metadata(
+        train_path=train_path,
+        test_path=test_path,
+        tokenizer=_TinyTokenizer(),
+        train_samples=10,
+        eval_samples=5,
+        train_include_tail=2,
+    )
+    train_path.write_text('{"messages": []}\n{"messages": []}\n', encoding="utf-8")
+    metadata_b = train_brick._tokenized_cache_metadata(
+        train_path=train_path,
+        test_path=test_path,
+        tokenizer=_TinyTokenizer(),
+        train_samples=10,
+        eval_samples=5,
+        train_include_tail=2,
+    )
+
+    assert train_brick._tokenized_cache_key(metadata_a) != train_brick._tokenized_cache_key(metadata_b)
+
+
+def test_tokenized_cache_loads_without_retokenizing(tmp_path):
+    train_ds = datasets.Dataset.from_dict({
+        "messages": [[
+            {"role": "user", "content": "make a red house"},
+            {"role": "assistant", "content": "2x4 (0,0,0) #C91A09\nDONE"},
+        ]],
+    })
+    eval_ds = datasets.Dataset.from_dict({
+        "messages": [[
+            {"role": "user", "content": "make a blue car"},
+            {"role": "assistant", "content": "2x4 (0,0,0) #0055BF\nDONE"},
+        ]],
+    })
+    metadata = {"version": 1, "case": "unit"}
+    tokenizer = _TinyTokenizer()
+
+    train_a, eval_a = train_brick._load_or_create_tokenized_datasets(
+        train_ds=train_ds,
+        eval_ds=eval_ds,
+        tokenizer=tokenizer,
+        cache_root=tmp_path / "cache",
+        metadata=metadata,
+        rebuild=False,
+    )
+    tokenizer.apply_chat_template = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("re-tokenized"))
+    train_b, eval_b = train_brick._load_or_create_tokenized_datasets(
+        train_ds=train_ds,
+        eval_ds=eval_ds,
+        tokenizer=tokenizer,
+        cache_root=tmp_path / "cache",
+        metadata=metadata,
+        rebuild=False,
+    )
+
+    assert train_a["input_ids"] == train_b["input_ids"]
+    assert eval_a["input_ids"] == eval_b["input_ids"]
+    assert train_b.column_names == ["input_ids"]

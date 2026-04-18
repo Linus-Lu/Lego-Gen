@@ -155,6 +155,9 @@ python -m backend.training.train_brick \
   [--eval-steps 200]
   [--save-steps 200]
   [--gradient-accumulation-steps 16]
+  [--tokenized-cache-dir data/brick_training_v2/.tokenized_cache]
+  [--rebuild-tokenized-cache]
+  [--no-gradient-checkpointing]
   [--save-total-limit 5]
 ```
 
@@ -169,6 +172,13 @@ append source-controlled v2 canary examples.
 `--train-samples` can bound fast canary gates. Step eval uses a deterministic
 subset (`--eval-samples`, default `512`) so checkpoint eval does not scan the
 entire test split every few hundred optimizer steps.
+
+**Tokenized cache** — by default, the trainer writes a deterministic tokenized
+dataset cache under `<data-dir>/.tokenized_cache/`, keyed by train/test file
+hashes, tokenizer fingerprint, chat template, and subset settings. Re-running
+with the same data and settings loads `input_ids` directly and skips the TRL
+`Tokenizing train dataset` pass. Use `--rebuild-tokenized-cache` to force a
+fresh cache entry and `--no-tokenized-cache` only when debugging tokenization.
 
 **Structure-aware loss** (`train_brick.py`, class `BrickStructureWeights`).
 Per-token weights:
@@ -189,8 +199,12 @@ memory during training and eval.
 - `per_device_train_batch_size=1`, `gradient_accumulation_steps=16` ⇒ effective batch 16 on one GPU
 - `learning_rate=1e-3`, `lr_scheduler="cosine"`, `warmup_steps=100` (capped to 10% for `--max-steps` gates)
 - `max_seq_length=4096`, `num_epochs=3`
-- `bf16=True`, `gradient_checkpointing=True`, `optim="adamw_torch"`
+- `bf16=True`, `gradient_checkpointing=True` by default, `optim="adamw_torch"`
 - `save_steps=200`, `eval_steps=200`, `eval_samples=512`, `save_total_limit=5` by default, W&B when available
+
+On high-memory cards such as RTX PRO 6000 96GB, `--no-gradient-checkpointing`
+can improve throughput at the cost of higher activation memory. On 32GB 5090,
+test it with a short `--max-steps` run before using it for a full train.
 
 **LoRA config** — `r=32`, `alpha=64`, `dropout=0.05`,
 `target_modules=["q_proj", "v_proj"]` (narrower than Stage 1 because the
