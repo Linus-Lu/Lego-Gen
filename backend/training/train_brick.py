@@ -375,6 +375,7 @@ def _tokenized_cache_metadata(
     train_path: Path,
     test_path: Path,
     tokenizer,
+    max_seq_length: int,
     train_samples: int | None,
     eval_samples: int | None,
     train_include_tail: int,
@@ -398,10 +399,11 @@ def _tokenized_cache_metadata(
             "eval_seed": seed + 1,
             "eval_samples": eval_samples,
             "train_include_tail": train_include_tail,
+            "max_seq_length": max_seq_length,
         },
         "format": {
             "source_column": "messages",
-            "tokenizer_call": "apply_chat_template(tokenize=True, return_dict=True)",
+            "tokenizer_call": "apply_chat_template(tokenize=True, return_dict=True, truncation=True, max_length=max_seq_length)",
         },
     }
 
@@ -435,12 +437,14 @@ def _unwrap_tokenizer_output(value):
     return value
 
 
-def _tokenize_chat_dataset(dataset, tokenizer, *, name: str):
+def _tokenize_chat_dataset(dataset, tokenizer, *, name: str, max_seq_length: int):
     def tokenize_example(example):
         processed = tokenizer.apply_chat_template(
             example["messages"],
             tokenize=True,
             return_dict=True,
+            truncation=True,
+            max_length=max_seq_length,
         )
         output = {"input_ids": _unwrap_tokenizer_output(processed["input_ids"])}
         if "assistant_masks" in processed:
@@ -459,6 +463,7 @@ def _load_or_create_tokenized_datasets(
     train_ds,
     eval_ds,
     tokenizer,
+    max_seq_length: int,
     cache_root: Path,
     metadata: dict,
     rebuild: bool,
@@ -479,8 +484,18 @@ def _load_or_create_tokenized_datasets(
 
         print(f"Building tokenized dataset cache: {cache_dir}", flush=True)
         tokenized = DatasetDict({
-            "train": _tokenize_chat_dataset(train_ds, tokenizer, name="train"),
-            "eval": _tokenize_chat_dataset(eval_ds, tokenizer, name="eval"),
+            "train": _tokenize_chat_dataset(
+                train_ds,
+                tokenizer,
+                name="train",
+                max_seq_length=max_seq_length,
+            ),
+            "eval": _tokenize_chat_dataset(
+                eval_ds,
+                tokenizer,
+                name="eval",
+                max_seq_length=max_seq_length,
+            ),
         })
 
         tmp_dir = cache_root / f".{cache_key}.tmp"
@@ -583,6 +598,7 @@ def main() -> None:
             train_path=train_path,
             test_path=test_path,
             tokenizer=tokenizer,
+            max_seq_length=args.max_seq_length,
             train_samples=args.train_samples,
             eval_samples=args.eval_samples,
             train_include_tail=train_include_tail,
@@ -592,6 +608,7 @@ def main() -> None:
             train_ds=train_ds,
             eval_ds=eval_ds,
             tokenizer=tokenizer,
+            max_seq_length=args.max_seq_length,
             cache_root=_tokenized_cache_root(args.data_dir, args.tokenized_cache_dir),
             metadata=cache_metadata,
             rebuild=args.rebuild_tokenized_cache,

@@ -172,11 +172,22 @@ class _TinyTokenizer:
     def __len__(self):
         return 128
 
-    def apply_chat_template(self, messages, *, tokenize, return_dict):
+    def apply_chat_template(
+        self,
+        messages,
+        *,
+        tokenize,
+        return_dict,
+        truncation=False,
+        max_length=None,
+    ):
         assert tokenize is True
         assert return_dict is True
         text = "\n".join(f"{message['role']}:{message['content']}" for message in messages)
-        return {"input_ids": [(ord(char) % 97) + 3 for char in text]}
+        ids = [(ord(char) % 97) + 3 for char in text]
+        if truncation and max_length is not None:
+            ids = ids[:max_length]
+        return {"input_ids": ids}
 
 
 def test_tokenized_cache_metadata_changes_with_data(tmp_path):
@@ -189,6 +200,7 @@ def test_tokenized_cache_metadata_changes_with_data(tmp_path):
         train_path=train_path,
         test_path=test_path,
         tokenizer=_TinyTokenizer(),
+        max_seq_length=2048,
         train_samples=10,
         eval_samples=5,
         train_include_tail=2,
@@ -199,11 +211,33 @@ def test_tokenized_cache_metadata_changes_with_data(tmp_path):
         train_path=train_path,
         test_path=test_path,
         tokenizer=_TinyTokenizer(),
+        max_seq_length=2048,
         train_samples=10,
         eval_samples=5,
         train_include_tail=2,
         seed=42,
     )
+
+    assert train_brick._tokenized_cache_key(metadata_a) != train_brick._tokenized_cache_key(metadata_b)
+
+
+def test_tokenized_cache_metadata_changes_with_max_seq_length(tmp_path):
+    train_path = tmp_path / "train.jsonl"
+    test_path = tmp_path / "test.jsonl"
+    train_path.write_text('{"messages": []}\n', encoding="utf-8")
+    test_path.write_text('{"messages": []}\n', encoding="utf-8")
+
+    common = dict(
+        train_path=train_path,
+        test_path=test_path,
+        tokenizer=_TinyTokenizer(),
+        train_samples=10,
+        eval_samples=5,
+        train_include_tail=2,
+        seed=42,
+    )
+    metadata_a = train_brick._tokenized_cache_metadata(max_seq_length=2048, **common)
+    metadata_b = train_brick._tokenized_cache_metadata(max_seq_length=4096, **common)
 
     assert train_brick._tokenized_cache_key(metadata_a) != train_brick._tokenized_cache_key(metadata_b)
 
@@ -228,6 +262,7 @@ def test_tokenized_cache_loads_without_retokenizing(tmp_path):
         train_ds=train_ds,
         eval_ds=eval_ds,
         tokenizer=tokenizer,
+        max_seq_length=16,
         cache_root=tmp_path / "cache",
         metadata=metadata,
         rebuild=False,
@@ -237,6 +272,7 @@ def test_tokenized_cache_loads_without_retokenizing(tmp_path):
         train_ds=train_ds,
         eval_ds=eval_ds,
         tokenizer=tokenizer,
+        max_seq_length=16,
         cache_root=tmp_path / "cache",
         metadata=metadata,
         rebuild=False,
@@ -245,3 +281,5 @@ def test_tokenized_cache_loads_without_retokenizing(tmp_path):
     assert train_a["input_ids"] == train_b["input_ids"]
     assert eval_a["input_ids"] == eval_b["input_ids"]
     assert train_b.column_names == ["input_ids"]
+    assert max(len(ids) for ids in train_b["input_ids"]) <= 16
+    assert max(len(ids) for ids in eval_b["input_ids"]) <= 16
