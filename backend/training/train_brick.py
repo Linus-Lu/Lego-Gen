@@ -18,7 +18,7 @@ import torch.nn.functional as F
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from datasets import load_dataset
+from datasets import concatenate_datasets, load_dataset
 from peft import LoraConfig, get_peft_model
 from transformers import (
     AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer,
@@ -236,12 +236,32 @@ def _effective_warmup_steps(max_steps: int | None, requested_warmup_steps: int) 
     return min(requested_warmup_steps, max(1, max_steps // 10))
 
 
-def _select_dataset_subset(dataset, limit: int | None, *, seed: int, name: str):
+def _select_dataset_subset(
+    dataset,
+    limit: int | None,
+    *,
+    seed: int,
+    name: str,
+    include_tail: int = 0,
+):
     _validate_positive(f"{name}-samples", limit, allow_none=True)
+    if include_tail < 0:
+        raise SystemExit("--include-tail must be non-negative")
     if limit is None or limit >= len(dataset):
         print(f"Using full {name} dataset: {len(dataset)} examples", flush=True)
         return dataset
-    subset = dataset.shuffle(seed=seed).select(range(limit))
+    tail_count = min(include_tail, limit)
+    head_count = limit - tail_count
+    if tail_count:
+        prefix_len = max(0, len(dataset) - tail_count)
+        prefix = dataset.select(range(prefix_len))
+        pieces = []
+        if head_count:
+            pieces.append(prefix.shuffle(seed=seed).select(range(head_count)))
+        pieces.append(dataset.select(range(len(dataset) - tail_count, len(dataset))))
+        subset = concatenate_datasets(pieces)
+    else:
+        subset = dataset.shuffle(seed=seed).select(range(limit))
     print(f"Using {name} subset: {len(subset)} / {len(dataset)} examples", flush=True)
     return subset
 
@@ -331,7 +351,11 @@ def main() -> None:
     # the dataset. ``apply_curriculum_ordering`` is still exported for callers
     # that build their own DataLoader with ``shuffle=False``.
     train_ds = _select_dataset_subset(
-        ds["train"], args.train_samples, seed=DEFAULT_SEED, name="train"
+        ds["train"],
+        args.train_samples,
+        seed=DEFAULT_SEED,
+        name="train",
+        include_tail=256 if args.train_samples is not None else 0,
     )
     eval_ds = _select_dataset_subset(
         ds["test"], args.eval_samples, seed=DEFAULT_SEED + 1, name="eval"

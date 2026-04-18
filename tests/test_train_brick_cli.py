@@ -76,11 +76,20 @@ def test_select_dataset_subset_is_deterministic_and_bounded():
 
     subset_a = train_brick._select_dataset_subset(ds, 5, seed=123, name="eval")
     subset_b = train_brick._select_dataset_subset(ds, 5, seed=123, name="eval")
+    with_tail = train_brick._select_dataset_subset(
+        ds,
+        5,
+        seed=123,
+        name="train",
+        include_tail=2,
+    )
     full = train_brick._select_dataset_subset(ds, 25, seed=123, name="eval")
 
     assert len(subset_a) == 5
     assert subset_a["value"] == subset_b["value"]
     assert len(set(subset_a["value"])) == 5
+    assert len(with_tail) == 5
+    assert with_tail["value"][-2:] == [18, 19]
     assert len(full) == len(ds)
 
     with pytest.raises(SystemExit):
