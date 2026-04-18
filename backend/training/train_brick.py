@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -37,6 +38,10 @@ from backend.config import (
     BRICK_NUM_EPOCHS, BRICK_LORA_R, BRICK_LORA_ALPHA, BRICK_LORA_DROPOUT,
     BRICK_TRAINING_DATA, USE_BF16,
 )
+
+LOSS_CHUNK_TOKENS = 1024
+DEFAULT_EVAL_SAMPLES = 512
+DEFAULT_SEED = 42
 
 
 # ── Structure-aware loss for brick format ─────────────────────────────────
@@ -71,21 +76,32 @@ class BrickStructureWeights:
 
         # Remove overlap (structure wins)
         self.boilerplate_ids -= self.structure_ids
+        self._id_cache = {}
 
         print(f"[BrickStructureWeights] boilerplate token IDs: {len(self.boilerplate_ids)}, "
               f"structure token IDs: {len(self.structure_ids)}")
+
+    def _cached_ids(self, name: str, ids: set[int], device: torch.device):
+        if not ids:
+            return None
+        key = (name, str(device))
+        cached = self._id_cache.get(key)
+        if cached is None:
+            cached = torch.tensor(sorted(ids), device=device)
+            self._id_cache[key] = cached
+        return cached
 
     def get_weights(self, labels: torch.Tensor) -> torch.Tensor:
         """Return per-token weights. Shape matches labels. Vectorized."""
         weights = torch.ones_like(labels, dtype=torch.float32)
 
-        if self.boilerplate_ids:
-            bp_ids = torch.tensor(list(self.boilerplate_ids), device=labels.device)
+        bp_ids = self._cached_ids("boilerplate", self.boilerplate_ids, labels.device)
+        if bp_ids is not None:
             bp_mask = (labels.unsqueeze(-1) == bp_ids).any(-1)
             weights[bp_mask] = self.boilerplate_weight
 
-        if self.structure_ids:
-            st_ids = torch.tensor(list(self.structure_ids), device=labels.device)
+        st_ids = self._cached_ids("structure", self.structure_ids, labels.device)
+        if st_ids is not None:
             st_mask = (labels.unsqueeze(-1) == st_ids).any(-1)
             weights[st_mask] = self.structure_weight
 
@@ -159,6 +175,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Number of training epochs")
     parser.add_argument("--max-steps", type=int, default=None,
                         help="Stop after this many optimizer steps; useful for canary gates")
+    parser.add_argument("--train-samples", type=int, default=None,
+                        help="Optional deterministic train subset size for fast gates")
+    parser.add_argument("--eval-samples", type=int, default=DEFAULT_EVAL_SAMPLES,
+                        help="Deterministic eval subset size; keeps step eval bounded")
+    parser.add_argument("--eval-steps", type=int, default=200,
+                        help="Run bounded eval every N optimizer steps")
+    parser.add_argument("--save-steps", type=int, default=200,
+                        help="Save checkpoints every N optimizer steps")
+    parser.add_argument("--warmup-steps", type=int, default=100,
+                        help="Requested LR warmup steps; capped to 10%% for max-step gates")
+    parser.add_argument("--batch-size", type=int, default=BRICK_BATCH_SIZE,
+                        help="Per-device train batch size")
+    parser.add_argument("--gradient-accumulation-steps", type=int,
+                        default=BRICK_GRADIENT_ACCUMULATION,
+                        help="Gradient accumulation steps")
+    parser.add_argument("--eval-accumulation-steps", type=int, default=1,
+                        help="Move eval outputs to CPU this often when supported")
+    parser.add_argument("--dataloader-num-workers", type=int, default=4,
+                        help="Training dataloader worker processes")
     parser.add_argument("--save-total-limit", type=int, default=5,
                         help="How many recent checkpoints to retain")
     parser.add_argument("--no-wandb", action="store_true",
@@ -184,11 +219,58 @@ def _resolve_resume_checkpoint(resume: str | None, output_dir: str) -> str | Non
     return str(checkpoints[-1]) if checkpoints else None
 
 
+def _validate_positive(name: str, value: int | None, *, allow_none: bool = False) -> None:
+    if value is None and allow_none:
+        return
+    if value is None or value <= 0:
+        raise SystemExit(f"--{name} must be positive")
+
+
+def _effective_warmup_steps(max_steps: int | None, requested_warmup_steps: int) -> int:
+    _validate_positive("warmup-steps", requested_warmup_steps)
+    if max_steps is None:
+        return requested_warmup_steps
+    _validate_positive("max-steps", max_steps)
+    # Canary gates should spend some steps at a useful learning rate instead of
+    # ending entirely inside the default 100-step warmup.
+    return min(requested_warmup_steps, max(1, max_steps // 10))
+
+
+def _select_dataset_subset(dataset, limit: int | None, *, seed: int, name: str):
+    _validate_positive(f"{name}-samples", limit, allow_none=True)
+    if limit is None or limit >= len(dataset):
+        print(f"Using full {name} dataset: {len(dataset)} examples", flush=True)
+        return dataset
+    subset = dataset.shuffle(seed=seed).select(range(limit))
+    print(f"Using {name} subset: {len(subset)} / {len(dataset)} examples", flush=True)
+    return subset
+
+
 def main() -> None:
     parser = build_arg_parser()
     # parse_args (not parse_known_args) so unknown flags surface as errors;
     # the silent-drop behaviour previously here hid typos in scripts.
     args = parser.parse_args()
+    for flag_name in [
+        "eval-steps",
+        "save-steps",
+        "batch-size",
+        "gradient-accumulation-steps",
+        "eval-accumulation-steps",
+        "save-total-limit",
+    ]:
+        _validate_positive(flag_name, getattr(args, flag_name.replace("-", "_")))
+    if args.dataloader_num_workers < 0:
+        raise SystemExit("--dataloader-num-workers must be non-negative")
+    if args.save_steps % args.eval_steps != 0:
+        raise SystemExit("--save-steps must be a multiple of --eval-steps")
+    warmup_steps = _effective_warmup_steps(args.max_steps, args.warmup_steps)
+    if warmup_steps != args.warmup_steps:
+        print(
+            f"Capping warmup_steps from {args.warmup_steps} to {warmup_steps} "
+            f"for max_steps={args.max_steps}",
+            flush=True,
+        )
 
     args.resume = _resolve_resume_checkpoint(args.resume, args.output_dir)
     if args.resume:
@@ -216,6 +298,8 @@ def main() -> None:
     model = AutoModelForCausalLM.from_pretrained(
         BRICK_MODEL_NAME, torch_dtype="auto", trust_remote_code=True,
     )
+    if hasattr(model.config, "use_cache"):
+        model.config.use_cache = False
 
     # PEFT warns that DoRA + PiSSA is not a supported combination: PiSSA
     # factorises the base weights via SVD and stores the residual back into
@@ -246,7 +330,12 @@ def main() -> None:
     # epoch, which destroys any prefix ordering — so we no longer pre-sort
     # the dataset. ``apply_curriculum_ordering`` is still exported for callers
     # that build their own DataLoader with ``shuffle=False``.
-    train_ds = ds["train"]
+    train_ds = _select_dataset_subset(
+        ds["train"], args.train_samples, seed=DEFAULT_SEED, name="train"
+    )
+    eval_ds = _select_dataset_subset(
+        ds["test"], args.eval_samples, seed=DEFAULT_SEED + 1, name="eval"
+    )
 
     # ── Structure-aware loss weights ─────────────────────────────────
     structure_weights = BrickStructureWeights(tokenizer)
@@ -257,12 +346,12 @@ def main() -> None:
     base_kwargs = dict(
         output_dir=output_dir,
         num_train_epochs=args.epochs,
-        per_device_train_batch_size=BRICK_BATCH_SIZE,
+        per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=BRICK_GRADIENT_ACCUMULATION,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=BRICK_LEARNING_RATE,
         lr_scheduler_type="cosine",
-        warmup_steps=100,
+        warmup_steps=warmup_steps,
         max_grad_norm=0.5,
         optim="adamw_torch",
         bf16=USE_BF16,
@@ -270,16 +359,16 @@ def main() -> None:
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         logging_steps=10,
-        save_steps=200,
+        save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
         eval_strategy="steps",
-        eval_steps=200,
+        eval_steps=args.eval_steps,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         report_to="none" if args.no_wandb else "wandb",
         dataloader_pin_memory=True,
-        dataloader_num_workers=4,
+        dataloader_num_workers=args.dataloader_num_workers,
     )
     if args.max_steps is not None:
         if args.max_steps <= 0:
@@ -291,6 +380,14 @@ def main() -> None:
     config_params = _inspect_params(ConfigClass)
 
     config_kwargs = dict(base_kwargs)
+    optional_config_kwargs = {
+        "prediction_loss_only": True,
+        "eval_accumulation_steps": args.eval_accumulation_steps,
+        "torch_empty_cache_steps": 10,
+    }
+    for key, value in optional_config_kwargs.items():
+        if key in config_params:
+            config_kwargs[key] = value
     if "max_seq_length" in config_params:
         config_kwargs["max_seq_length"] = BRICK_MAX_SEQ_LENGTH
     elif "max_length" in config_params:
@@ -300,6 +397,9 @@ def main() -> None:
 
     print(f"Using config class: {ConfigClass.__name__}", flush=True)
     training_args = ConfigClass(**config_kwargs)
+    for key, value in optional_config_kwargs.items():
+        if hasattr(training_args, key):
+            setattr(training_args, key, value)
 
     # ── Build custom trainer with structure-aware loss + curriculum ───
     class BrickTrainer(SFTTrainer):
@@ -315,15 +415,30 @@ def main() -> None:
             seq_len = shift_labels.size(1)
 
             # Apply structure-aware weights
-            weights = structure_weights.get_weights(shift_labels).view(-1)
+            weights = structure_weights.get_weights(shift_labels)
 
-            # Cross-entropy loss — single vectorized call
-            shift_logits = logits[:, :seq_len, :].contiguous().view(-1, logits.size(-1))
-            flat_labels = shift_labels.view(-1)
-            loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
-            per_token_loss = loss_fct(shift_logits, flat_labels)
+            # Compute CE in token chunks so eval/train do not allocate a giant
+            # [batch * sequence, vocab] temporary on top of the model logits.
+            vocab_size = logits.size(-1)
+            loss_sum = torch.zeros((), device=logits.device, dtype=torch.float32)
+            weight_sum = weights.sum().to(device=logits.device, dtype=torch.float32).clamp(min=1.0)
+            for start in range(0, seq_len, LOSS_CHUNK_TOKENS):
+                end = min(start + LOSS_CHUNK_TOKENS, seq_len)
+                chunk_logits = logits[:, start:end, :].reshape(-1, vocab_size)
+                chunk_labels = shift_labels[:, start:end].reshape(-1)
+                chunk_weights = weights[:, start:end].reshape(-1).to(
+                    device=logits.device,
+                    dtype=torch.float32,
+                )
+                chunk_loss = F.cross_entropy(
+                    chunk_logits,
+                    chunk_labels,
+                    reduction="none",
+                    ignore_index=-100,
+                ).float()
+                loss_sum = loss_sum + (chunk_loss * chunk_weights).sum()
 
-            weighted_loss = (per_token_loss * weights).sum() / weights.sum().clamp(min=1.0)
+            weighted_loss = loss_sum / weight_sum
 
             return (weighted_loss, outputs) if return_outputs else weighted_loss
 
@@ -337,7 +452,7 @@ def main() -> None:
         model=model,
         args=training_args,
         train_dataset=train_ds,
-        eval_dataset=ds["test"],
+        eval_dataset=eval_ds,
         callbacks=[
             MemoryCleanupCallback(),
         ],

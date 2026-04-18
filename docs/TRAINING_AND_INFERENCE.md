@@ -150,6 +150,11 @@ python -m backend.training.train_brick \
   [--resume none|auto|/path/to/checkpoint]
   [--data-dir data/brick_training_v2]
   [--max-steps 80]
+  [--train-samples 4096]
+  [--eval-samples 512]
+  [--eval-steps 200]
+  [--save-steps 200]
+  [--gradient-accumulation-steps 16]
   [--save-total-limit 5]
 ```
 
@@ -160,9 +165,10 @@ assistant reply ends with brick lines followed by `DONE`.
 `prepare_brick_dataset.py` generates these from StableText2Brick and can
 append source-controlled v2 canary examples.
 
-**Curriculum** — samples are split into "untruncated" (estimated tokens
-`(len(content)/3.0) + 80` ≤ `max_seq_length`) and "truncated", then
-concatenated so the model sees the clean prefix first.
+**Sampling controls** — full training uses the whole train set by default, but
+`--train-samples` can bound fast canary gates. Step eval uses a deterministic
+subset (`--eval-samples`, default `512`) so checkpoint eval does not scan the
+entire test split every few hundred optimizer steps.
 
 **Structure-aware loss** (`train_brick.py`, class `BrickStructureWeights`).
 Per-token weights:
@@ -175,15 +181,16 @@ Per-token weights:
 | Masked prompt tokens (`-100`) | `0.0` |
 
 Implemented via an override of `Trainer.compute_loss` that applies the
-weights to a single vectorized cross-entropy call.
+weights to chunked cross-entropy over token blocks to reduce peak temporary
+memory during training and eval.
 
 **Trainer settings** — `trl.SFTTrainer` (with HF `TrainingArguments`):
 
-- `per_device_train_batch_size=1`, `gradient_accumulation_steps=16` ⇒ effective batch 16
-- `learning_rate=1e-3`, `lr_scheduler="cosine"`, `warmup_steps=100`
+- `per_device_train_batch_size=1`, `gradient_accumulation_steps=16` ⇒ effective batch 16 on one GPU
+- `learning_rate=1e-3`, `lr_scheduler="cosine"`, `warmup_steps=100` (capped to 10% for `--max-steps` gates)
 - `max_seq_length=4096`, `num_epochs=3`
 - `bf16=True`, `gradient_checkpointing=True`, `optim="adamw_torch"`
-- `save_steps=200`, `save_total_limit=5` by default, W&B when available
+- `save_steps=200`, `eval_steps=200`, `eval_samples=512`, `save_total_limit=5` by default, W&B when available
 
 **LoRA config** — `r=32`, `alpha=64`, `dropout=0.05`,
 `target_modules=["q_proj", "v_proj"]` (narrower than Stage 1 because the

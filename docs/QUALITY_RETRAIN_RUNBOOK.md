@@ -43,6 +43,8 @@ export BRICK_TRAINING_DATA=/root/autodl-tmp/Lego-Gen/data/brick_training_v2
   --data-dir data/brick_training_v2 \
   --output-dir backend/models/checkpoints/qwen35-4b-brick-lora-v2-canary \
   --max-steps 80 \
+  --train-samples 4096 \
+  --eval-samples 256 \
   --resume none \
   --save-total-limit 5 \
   --no-wandb
@@ -82,9 +84,19 @@ torchrun --nproc_per_node=2 -m backend.training.train_brick \
   --data-dir data/brick_training_v2 \
   --output-dir backend/models/checkpoints/qwen35-4b-brick-lora-v2 \
   --epochs 3 \
+  --eval-samples 1024 \
+  --eval-steps 500 \
+  --save-steps 500 \
+  --gradient-accumulation-steps 8 \
   --resume none \
   --save-total-limit 5
 ```
+
+The trainer uses a deterministic eval subset by default so checkpoint eval does
+not turn into a full-test-set bottleneck every few hundred optimizer steps. Use
+the separate quality eval below for final checkpoint selection. On 8x5090, keep
+the effective batch close to the single-GPU default by using
+`--gradient-accumulation-steps 2`.
 
 Evaluate promising checkpoints with both:
 
