@@ -222,6 +222,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Move eval outputs to CPU this often when supported")
     parser.add_argument("--dataloader-num-workers", type=int, default=4,
                         help="Training dataloader worker processes")
+    parser.add_argument("--group-by-length", action="store_true",
+                        help="Bucket tokenized samples by length to reduce padding and DDP stragglers")
+    parser.add_argument("--ddp-find-unused-parameters", action="store_true",
+                        help="Enable DDP unused-parameter detection; disabled by default for LoRA speed")
     parser.add_argument("--tokenized-cache-dir", type=Path, default=None,
                         help="Directory for reusable tokenized datasets; defaults to <data-dir>/.tokenized_cache")
     parser.add_argument("--rebuild-tokenized-cache", action="store_true",
@@ -446,7 +450,8 @@ def _tokenize_chat_dataset(dataset, tokenizer, *, name: str, max_seq_length: int
             truncation=True,
             max_length=max_seq_length,
         )
-        output = {"input_ids": _unwrap_tokenizer_output(processed["input_ids"])}
+        input_ids = _unwrap_tokenizer_output(processed["input_ids"])
+        output = {"input_ids": input_ids, "length": len(input_ids)}
         if "assistant_masks" in processed:
             output["assistant_masks"] = _unwrap_tokenizer_output(processed["assistant_masks"])
         return output
@@ -704,6 +709,9 @@ def main() -> None:
         "prediction_loss_only": True,
         "eval_accumulation_steps": args.eval_accumulation_steps,
         "torch_empty_cache_steps": 10,
+        "group_by_length": args.group_by_length,
+        "length_column_name": "length",
+        "ddp_find_unused_parameters": args.ddp_find_unused_parameters,
     }
     for key, value in optional_config_kwargs.items():
         if key in config_params:

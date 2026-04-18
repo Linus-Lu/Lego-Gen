@@ -53,6 +53,8 @@ def test_train_brick_parser_exposes_v2_controls(tmp_path):
         "2",
         "--gradient-accumulation-steps",
         "2",
+        "--group-by-length",
+        "--ddp-find-unused-parameters",
         "--tokenized-cache-dir",
         str(tmp_path / "token-cache"),
         "--rebuild-tokenized-cache",
@@ -96,6 +98,8 @@ def test_train_brick_parser_exposes_v2_controls(tmp_path):
     assert args.batch_size == 3
     assert args.eval_batch_size == 2
     assert args.gradient_accumulation_steps == 2
+    assert args.group_by_length is True
+    assert args.ddp_find_unused_parameters is True
     assert args.tokenized_cache_dir == tmp_path / "token-cache"
     assert args.rebuild_tokenized_cache is True
     assert args.no_gradient_checkpointing is True
@@ -280,6 +284,8 @@ def test_tokenized_cache_loads_without_retokenizing(tmp_path):
 
     assert train_a["input_ids"] == train_b["input_ids"]
     assert eval_a["input_ids"] == eval_b["input_ids"]
-    assert train_b.column_names == ["input_ids"]
+    assert train_b.column_names == ["input_ids", "length"]
     assert max(len(ids) for ids in train_b["input_ids"]) <= 16
     assert max(len(ids) for ids in eval_b["input_ids"]) <= 16
+    assert train_b["length"] == [len(ids) for ids in train_b["input_ids"]]
+    assert eval_b["length"] == [len(ids) for ids in eval_b["input_ids"]]
