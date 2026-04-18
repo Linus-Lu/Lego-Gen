@@ -25,8 +25,8 @@ from backend.brick.parser import Brick, serialize_brick
 COLOR_WORDS: dict[str, str] = {
     "dark gray": "6D6E5C",
     "dark grey": "6D6E5C",
-    "light gray": "9BA19D",
-    "light grey": "9BA19D",
+    "light gray": "6D6E5C",
+    "light grey": "6D6E5C",
     "red": "C91A09",
     "blue": "0055BF",
     "green": "237841",
@@ -34,8 +34,8 @@ COLOR_WORDS: dict[str, str] = {
     "black": "05131D",
     "white": "FFFFFF",
     "brown": "6D6E5C",
-    "gray": "9BA19D",
-    "grey": "9BA19D",
+    "gray": "6D6E5C",
+    "grey": "6D6E5C",
     "orange": "F2CD37",
     "pink": "FFFFFF",
     "purple": "0055BF",
@@ -44,7 +44,7 @@ COLOR_WORDS: dict[str, str] = {
 
 DEFAULT_PALETTE: list[str] = [
     "C91A09", "0055BF", "237841", "F2CD37",
-    "05131D", "FFFFFF", "6D6E5C", "9BA19D",
+    "05131D", "FFFFFF", "6D6E5C",
 ]
 
 # Dark colors for ground-level weight boost
@@ -62,32 +62,32 @@ SHAPENET_CATEGORIES: dict[str, str] = {
 }
 
 CATEGORY_PALETTES: dict[str, list[str]] = {
-    "basket":    ["6D6E5C", "FFFFFF", "9BA19D", "C91A09", "F2CD37"],
-    "bed":       ["FFFFFF", "9BA19D", "C91A09", "0055BF", "6D6E5C"],
-    "bench":     ["6D6E5C", "9BA19D", "05131D", "FFFFFF"],
+    "basket":    ["6D6E5C", "FFFFFF", "C91A09", "F2CD37"],
+    "bed":       ["FFFFFF", "6D6E5C", "C91A09", "0055BF"],
+    "bench":     ["6D6E5C", "05131D", "FFFFFF"],
     "birdhouse": ["6D6E5C", "FFFFFF", "F2CD37", "C91A09"],
-    "bookshelf": ["6D6E5C", "9BA19D", "05131D", "FFFFFF"],
-    "bottle":    ["237841", "0055BF", "C91A09", "9BA19D", "FFFFFF"],
-    "bowl":      ["FFFFFF", "9BA19D", "C91A09", "0055BF", "F2CD37"],
+    "bookshelf": ["6D6E5C", "05131D", "FFFFFF"],
+    "bottle":    ["237841", "0055BF", "C91A09", "6D6E5C", "FFFFFF"],
+    "bowl":      ["FFFFFF", "6D6E5C", "C91A09", "0055BF", "F2CD37"],
     "bus":       ["F2CD37", "C91A09", "0055BF", "FFFFFF", "05131D"],
-    "camera":    ["05131D", "9BA19D", "FFFFFF", "C91A09", "0055BF"],
-    "car":       ["C91A09", "0055BF", "05131D", "FFFFFF", "9BA19D"],
-    "chair":     ["6D6E5C", "9BA19D", "FFFFFF", "C91A09", "05131D"],
-    "guitar":    ["6D6E5C", "FFFFFF", "9BA19D", "C91A09", "05131D"],
-    "jar":       ["FFFFFF", "9BA19D", "C91A09", "237841", "0055BF"],
-    "mug":       ["FFFFFF", "C91A09", "0055BF", "F2CD37", "9BA19D"],
-    "piano":     ["05131D", "FFFFFF", "9BA19D", "6D6E5C"],
-    "pot":       ["C91A09", "237841", "9BA19D", "F2CD37", "05131D"],
-    "sofa":      ["C91A09", "0055BF", "9BA19D", "6D6E5C"],
-    "table":     ["6D6E5C", "FFFFFF", "9BA19D", "05131D"],
-    "tower":     ["9BA19D", "6D6E5C", "FFFFFF", "05131D"],
-    "train":     ["C91A09", "05131D", "0055BF", "9BA19D", "F2CD37"],
-    "vessel":    ["9BA19D", "0055BF", "FFFFFF", "C91A09", "05131D"],
+    "camera":    ["05131D", "6D6E5C", "FFFFFF", "C91A09", "0055BF"],
+    "car":       ["C91A09", "0055BF", "05131D", "FFFFFF", "6D6E5C"],
+    "chair":     ["6D6E5C", "FFFFFF", "C91A09", "05131D"],
+    "guitar":    ["6D6E5C", "FFFFFF", "C91A09", "05131D"],
+    "jar":       ["FFFFFF", "6D6E5C", "C91A09", "237841", "0055BF"],
+    "mug":       ["FFFFFF", "C91A09", "0055BF", "F2CD37", "6D6E5C"],
+    "piano":     ["05131D", "FFFFFF", "6D6E5C"],
+    "pot":       ["C91A09", "237841", "6D6E5C", "F2CD37", "05131D"],
+    "sofa":      ["C91A09", "0055BF", "6D6E5C"],
+    "table":     ["6D6E5C", "FFFFFF", "05131D"],
+    "tower":     ["6D6E5C", "FFFFFF", "05131D"],
+    "train":     ["C91A09", "05131D", "0055BF", "6D6E5C", "F2CD37"],
+    "vessel":    ["6D6E5C", "0055BF", "FFFFFF", "C91A09", "05131D"],
 }
 
 _SAFE_COLOR_REMAP: dict[str, str] = {
     "FEC401": "F2CD37",
-    "A0A5A9": "9BA19D",
+    "A0A5A9": "6D6E5C",
     "958A73": "6D6E5C",
     "E4CD9E": "FFFFFF",
     "583927": "6D6E5C",
@@ -439,9 +439,9 @@ def _canary_structures() -> list[tuple[str, list[Brick]]]:
         (
             "a gray tower with a red top",
             [
-                Brick(2, 2, 0, 0, 0, "9BA19D"),
-                Brick(2, 2, 0, 0, 1, "9BA19D"),
-                Brick(2, 2, 0, 0, 2, "9BA19D"),
+                Brick(2, 2, 0, 0, 0, "6D6E5C"),
+                Brick(2, 2, 0, 0, 1, "6D6E5C"),
+                Brick(2, 2, 0, 0, 2, "6D6E5C"),
                 Brick(2, 2, 0, 0, 3, "C91A09"),
             ],
         ),

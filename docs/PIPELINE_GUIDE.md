@@ -355,12 +355,13 @@ y, z)` — no colour. LEGO-Gen wants coloured bricks.
 `backend/data_pipeline/prepare_brick_dataset.py` solves this with a
 **deterministic colour map**:
 
-1. **Caption-driven.** If the caption contains a colour word (`red`,
-   `blue`, etc.), all bricks get that hex code
-   (`prepare_brick_dataset.py:116`).
-2. **Category-driven.** Otherwise pick from the category's palette
+1. **Caption-driven.** Caption colour words are extracted with word
+   boundaries and mapped to runtime-safe LEGO hex codes. Multi-colour
+   prompts use simple component heuristics instead of repainting every
+   brick with the first colour.
+2. **Category-driven.** If no caption colour is present, pick from the category's palette
    (`CATEGORY_PALETTES` at `prepare_brick_dataset.py:60`). E.g., cars
-   draw from `{"C91A09", "0055BF", "05131D", "FFFFFF", "A0A5A9"}`.
+   draw from `{"C91A09", "0055BF", "05131D", "FFFFFF", "6D6E5C"}`.
 3. **Ground-weighted dark colours.** For `z=0` bricks (the foundation),
    dark palette entries get double weight. This teaches the model that
    bases tend to be dark (foundations look like ground, not sky).

@@ -345,17 +345,17 @@ class TestGenerateLoop:
         pipeline = self._make_pipeline([])
 
         def slow_generate_one(input_ids, grid, logits_processor=None):
-            time.sleep(0.01)
+            time.sleep(0.1)
             return Brick(2, 4, 0, 0, 0, "C91A09"), 0, None
 
         pipeline._generate_one_brick = slow_generate_one
 
-        result = pipeline.generate("test", max_seconds=0.001)
+        result = pipeline.generate("test", max_seconds=0.05)
 
         assert result["brick_count"] == 1
         assert result["metadata"]["termination_reason"] == "max_seconds"
         assert result["metadata"]["hit_max_seconds"] is True
-        assert result["metadata"]["requested_max_seconds"] == 0.001
+        assert result["metadata"]["requested_max_seconds"] == 0.05
 
 
 def test_mock_generate_best_of_n_returns_valid_shape():
