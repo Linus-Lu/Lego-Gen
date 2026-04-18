@@ -39,7 +39,7 @@ def _load_ldraw_color_codes() -> dict[str, int]:
 def _color_code(color: str) -> int:
     try:
         palette = _load_ldraw_color_codes()
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return 16
     return palette.get(color.upper(), 16)
 

@@ -3,6 +3,13 @@
 // ═══════════════════════════════════════════════════════════════════
 
 const API_BASE = import.meta.env.VITE_API_URL ?? '';
+export const MAX_PROMPT_CHARS = 2000;
+
+export function getPromptValidationError(prompt: string): string | null {
+  return prompt.length > MAX_PROMPT_CHARS
+    ? `Prompt exceeds ${MAX_PROMPT_CHARS} characters`
+    : null;
+}
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -50,14 +57,16 @@ export interface GalleryBuild {
 
 // ── Brick parsing / layer projection ───────────────────────────────
 
-const BRICK_RE = /(\d+)x(\d+) \((\d+),(\d+),(\d+)\) #([0-9A-Fa-f]{6})/;
+const BRICK_RE = /^(\d+)x(\d+) \((\d+),(\d+),(\d+)\) #([0-9A-Fa-f]{6})$/;
 
 export function parseBrickString(raw: string): BrickCoord[] {
   if (!raw || !raw.trim()) return [];
-  return raw.trim().split('\n').flatMap(line => {
+  return raw.trim().split('\n').map((line, index) => {
     const m = line.trim().match(BRICK_RE);
-    if (!m) return [];
-    return [{ h: +m[1], w: +m[2], x: +m[3], y: +m[4], z: +m[5], color: '#' + m[6] }];
+    if (!m) {
+      throw new Error(`Invalid brick line at ${index + 1}`);
+    }
+    return { h: +m[1], w: +m[2], x: +m[3], y: +m[4], z: +m[5], color: '#' + m[6] };
   });
 }
 
@@ -129,6 +138,7 @@ export async function generateBricks(
 
 export type StreamEvent =
   | { type: 'progress'; stage: 'stage1' | 'stage2'; message: string; caption?: string }
+  | { type: 'rejection'; count: number }
   | { type: 'brick'; count: number }
   | { type: 'rollback'; count: number }
   | { type: 'sample'; index: number; of: number; stable: boolean };
@@ -208,6 +218,8 @@ export async function generateBricksStream(
 
         if (eventType === 'progress') {
           opts.onEvent({ type: 'progress', stage: data.stage, message: data.message, caption: data.caption });
+        } else if (eventType === 'rejection') {
+          opts.onEvent({ type: 'rejection', count: data.count });
         } else if (eventType === 'brick') {
           opts.onEvent({ type: 'brick', count: data.count });
         } else if (eventType === 'rollback') {
@@ -234,12 +246,12 @@ export async function generateBricksStream(
 export async function listGalleryBuilds(params?: {
   sort?: string;
   q?: string;
-}): Promise<GalleryBuild[]> {
+}, signal?: AbortSignal): Promise<GalleryBuild[]> {
   const qs = new URLSearchParams();
   if (params?.sort) qs.set('sort', params.sort);
   if (params?.q) qs.set('q', params.q);
   const suffix = qs.toString();
-  const res = await fetch(`${API_BASE}/api/gallery${suffix ? `?${suffix}` : ''}`);
+  const res = await fetch(`${API_BASE}/api/gallery${suffix ? `?${suffix}` : ''}`, { signal });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }

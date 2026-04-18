@@ -7,6 +7,10 @@ for Stage 2 brick-coordinate generation.
 
 from pathlib import Path
 
+from backend.inference.cancellation import (
+    build_stopping_criteria,
+    raise_if_cancelled,
+)
 from backend.config import (
     STAGE1_MODEL_NAME,
     STAGE1_CHECKPOINT_DIR,
@@ -71,9 +75,13 @@ class Stage1Pipeline:
 
         self.model.eval()
 
-    def describe(self, image) -> str:
+    def describe(self, image, *, should_cancel=None) -> str:
         """Run Stage 1: image → short description string."""
         import torch
+
+        if should_cancel is None:
+            should_cancel = getattr(self, "_should_cancel", None)
+        raise_if_cancelled(should_cancel)
 
         messages = [
             {"role": "system", "content": STAGE1_SYSTEM_PROMPT},
@@ -95,15 +103,20 @@ class Stage1Pipeline:
             text=[text], images=[image], return_tensors="pt",
         ).to(self.model.device)
 
-        with torch.inference_mode():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=STAGE1_MAX_NEW_TOKENS,
-                temperature=STAGE1_TEMPERATURE,
-                top_p=STAGE1_TOP_P,
-                do_sample=True,
-            )
+        generate_kwargs = {
+            "max_new_tokens": STAGE1_MAX_NEW_TOKENS,
+            "temperature": STAGE1_TEMPERATURE,
+            "top_p": STAGE1_TOP_P,
+            "do_sample": True,
+        }
+        stopping_criteria = build_stopping_criteria(should_cancel)
+        if stopping_criteria is not None:
+            generate_kwargs["stopping_criteria"] = stopping_criteria
 
+        with torch.inference_mode():
+            outputs = self.model.generate(**inputs, **generate_kwargs)
+
+        raise_if_cancelled(should_cancel)
         generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
         raw = self.processor.tokenizer.decode(generated_ids, skip_special_tokens=True)
         return _strip_thinking_blocks(raw)

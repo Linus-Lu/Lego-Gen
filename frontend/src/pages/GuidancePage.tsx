@@ -30,7 +30,18 @@ export default function GuidancePage() {
       .catch(e => { setError(e?.message ?? 'Failed to load'); setLoading(false); });
   }, [buildId]);
 
-  const bricks = useMemo(() => (build ? parseBrickString(build.bricks) : []), [build]);
+  const parsedBuild = useMemo(() => {
+    if (!build) return { bricks: [], parseError: '' };
+    try {
+      return { bricks: parseBrickString(build.bricks), parseError: '' };
+    } catch (e) {
+      return {
+        bricks: [],
+        parseError: e instanceof Error ? e.message : 'Invalid brick data in archive entry',
+      };
+    }
+  }, [build]);
+  const bricks = parsedBuild.bricks;
   const { steps: layers, zLevels } = useMemo(() => bricksToLayers(bricks), [bricks]);
 
   // Autoplay
@@ -77,13 +88,13 @@ export default function GuidancePage() {
     );
   }
 
-  if (error || !build) {
+  if (error || parsedBuild.parseError || !build) {
     return (
       <PageShell>
         <div className="flex-1 grid place-items-center">
           <div className="text-center max-w-md">
             <p className="label-accent mb-2" style={{ color: 'var(--color-danger)' }}>ERR // BUILD_NOT_FOUND</p>
-            <p className="mono text-[13px] text-[var(--color-fg-strong)] mb-6">{error || 'No such build in archive.'}</p>
+            <p className="mono text-[13px] text-[var(--color-fg-strong)] mb-6">{error || parsedBuild.parseError || 'No such build in archive.'}</p>
             <button onClick={() => navigate('/explore')} className="btn-ghost">← back to archive</button>
           </div>
         </div>

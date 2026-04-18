@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import Header from '../components/Header';
 import Footer from '../components/Footer';
@@ -20,24 +20,33 @@ export default function ExplorePage() {
   const [error, setError] = useState('');
   const [sort, setSort] = useState<SortKey>('newest');
   const [q, setQ] = useState('');
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const res = await listGalleryBuilds({ sort, q: q || undefined });
-      setBuilds(res);
-    } catch (e: any) {
-      setError(e?.message ?? 'Failed to load archive');
-    } finally {
-      setLoading(false);
-    }
-  }, [sort, q]);
+  const requestIdRef = useRef(0);
 
   useEffect(() => {
-    const t = setTimeout(load, 100);
-    return () => clearTimeout(t);
-  }, [load]);
+    const controller = new AbortController();
+    const requestId = ++requestIdRef.current;
+    const t = setTimeout(() => {
+      setLoading(true);
+      setError('');
+      listGalleryBuilds({ sort, q: q || undefined }, controller.signal)
+        .then(res => {
+          if (controller.signal.aborted || requestId !== requestIdRef.current) return;
+          setBuilds(res);
+        })
+        .catch((e: any) => {
+          if (controller.signal.aborted || requestId !== requestIdRef.current) return;
+          setError(e?.message ?? 'Failed to load archive');
+        })
+        .finally(() => {
+          if (controller.signal.aborted || requestId !== requestIdRef.current) return;
+          setLoading(false);
+        });
+    }, 100);
+    return () => {
+      clearTimeout(t);
+      controller.abort();
+    };
+  }, [sort, q]);
 
   const totals = useMemo(() => ({
     builds: builds.length,

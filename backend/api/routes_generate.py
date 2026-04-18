@@ -1,6 +1,7 @@
 """FastAPI routes for LEGO brick-coordinate generation."""
 
 import asyncio
+import inspect
 import io
 import json
 import threading
@@ -13,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from backend.brick.ldraw import export_ldr
 from backend.brick.parser import parse_brick_sequence
+from backend.inference.cancellation import GenerationCancelled
 from backend.inference.brick_pipeline import get_brick_pipeline
 from backend.config import INFERENCE_TIMEOUT_SECONDS, LEGOGEN_DEV
 
@@ -74,6 +76,18 @@ def _validate_prompt(prompt: str) -> str:
     return prompt.strip() if prompt else ""
 
 
+def _call_with_supported_kwargs(fn, /, *args, **kwargs):
+    """Call *fn* with only the keyword arguments it explicitly supports."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return fn(*args, **kwargs)
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()):
+        return fn(*args, **kwargs)
+    supported = {key: value for key, value in kwargs.items() if key in params}
+    return fn(*args, **supported)
+
+
 @router.post("/generate-bricks")
 async def generate_bricks(
     image: UploadFile = File(default=None),
@@ -109,17 +123,35 @@ async def generate_bricks(
         del contents
         if n > 1:
             call = lambda: _from_image_bon(
-                pipeline, pil_image, n, on_progress=cancel.check_callback,
+                pipeline,
+                pil_image,
+                n,
+                on_progress=cancel.check_callback,
+                should_cancel=cancel.is_cancelled,
             )
         else:
-            call = lambda: pipeline.generate_from_image(pil_image)
+            call = lambda: _call_with_supported_kwargs(
+                pipeline.generate_from_image,
+                pil_image,
+                on_progress=cancel.check_callback,
+                should_cancel=cancel.is_cancelled,
+            )
     else:
         if n > 1:
-            call = lambda: pipeline.generate_best_of_n(
-                stripped_prompt, n=n, on_progress=cancel.check_callback,
+            call = lambda: _call_with_supported_kwargs(
+                pipeline.generate_best_of_n,
+                stripped_prompt,
+                n=n,
+                on_progress=cancel.check_callback,
+                should_cancel=cancel.is_cancelled,
             )
         else:
-            call = lambda: pipeline.generate(stripped_prompt)
+            call = lambda: _call_with_supported_kwargs(
+                pipeline.generate,
+                stripped_prompt,
+                on_progress=cancel.check_callback,
+                should_cancel=cancel.is_cancelled,
+            )
 
     try:
         result = await asyncio.wait_for(
@@ -163,6 +195,9 @@ class _CancelToken:
     def is_set(self) -> bool:
         return self._event.is_set()
 
+    def is_cancelled(self) -> bool:
+        return self._event.is_set()
+
     def check_callback(self, _evt: dict) -> None:
         if self._event.is_set():
             raise _Cancelled()
@@ -172,7 +207,7 @@ class _Cancelled(Exception):
     """Raised inside the worker thread when the request has been cancelled."""
 
 
-def _from_image_bon(pipeline, pil_image, n: int, on_progress=None) -> dict:
+def _from_image_bon(pipeline, pil_image, n: int, on_progress=None, should_cancel=None) -> dict:
     """Image path BoN: describe once, then BoN on the caption.
 
     Avoids running Stage 1 n times — it's the expensive VLM call. The caller
@@ -181,10 +216,20 @@ def _from_image_bon(pipeline, pil_image, n: int, on_progress=None) -> dict:
     expected to raise ``_Cancelled`` when the request is no longer wanted.
     """
     from backend.inference.brick_pipeline import _get_stage1_pipeline
-    caption = _get_stage1_pipeline().describe(pil_image)
+    caption = _call_with_supported_kwargs(
+        _get_stage1_pipeline().describe,
+        pil_image,
+        should_cancel=should_cancel,
+    )
     if on_progress is not None:
         on_progress({"type": "caption", "caption": caption})
-    result = pipeline.generate_best_of_n(caption, n=n, on_progress=on_progress)
+    result = _call_with_supported_kwargs(
+        pipeline.generate_best_of_n,
+        caption,
+        n=n,
+        on_progress=on_progress,
+        should_cancel=should_cancel,
+    )
     result["caption"] = caption
     return result
 
@@ -209,6 +254,7 @@ async def generate_stream(
 
     Events:
       - progress: {stage: "stage1"|"stage2", message: str}
+      - rejection:{count: int}                — cumulative local rejections
       - brick:    {count: int}                — after each brick placed
       - rollback: {count: int}                — after each physics rollback
       - sample:   {index: int, of: int}       — after each Best-of-N sample
@@ -246,14 +292,32 @@ async def generate_stream(
             if pil_image is not None:
                 if n > 1:
                     return _from_image_bon(
-                        pipeline, pil_image, n, on_progress=on_progress,
+                        pipeline,
+                        pil_image,
+                        n,
+                        on_progress=on_progress,
+                        should_cancel=cancel.is_cancelled,
                     )
-                return pipeline.generate_from_image(pil_image, on_progress=on_progress)
-            if n > 1:
-                return pipeline.generate_best_of_n(
-                    text_prompt, n=n, on_progress=on_progress,
+                return _call_with_supported_kwargs(
+                    pipeline.generate_from_image,
+                    pil_image,
+                    on_progress=on_progress,
+                    should_cancel=cancel.is_cancelled,
                 )
-            return pipeline.generate(text_prompt, on_progress=on_progress)
+            if n > 1:
+                return _call_with_supported_kwargs(
+                    pipeline.generate_best_of_n,
+                    text_prompt,
+                    n=n,
+                    on_progress=on_progress,
+                    should_cancel=cancel.is_cancelled,
+                )
+            return _call_with_supported_kwargs(
+                pipeline.generate,
+                text_prompt,
+                on_progress=on_progress,
+                should_cancel=cancel.is_cancelled,
+            )
 
         if pil_image is not None:
             yield _sse_event("progress", {"stage": "stage1", "message": "Analyzing image..."})
@@ -291,6 +355,8 @@ async def generate_stream(
                     if not announced_stage2:
                         yield _sse_event("progress", {"stage": "stage2", "message": "Generating bricks..."})
                         announced_stage2 = True
+                elif evt["type"] == "rejection":
+                    yield _sse_event("rejection", {"count": evt["count"]})
                 elif evt["type"] == "brick":
                     yield _sse_event("brick", {"count": evt["count"]})
                 elif evt["type"] == "rollback":
@@ -306,7 +372,9 @@ async def generate_stream(
             # Drain any late events.
             while not event_queue.empty():  # pragma: no cover — race-condition drain path; events queued after future.done() aren't deterministically reachable in tests.
                 evt = event_queue.get_nowait()
-                if evt["type"] == "brick":
+                if evt["type"] == "rejection":
+                    yield _sse_event("rejection", {"count": evt["count"]})
+                elif evt["type"] == "brick":
                     yield _sse_event("brick", {"count": evt["count"]})
                 elif evt["type"] == "rollback":
                     yield _sse_event("rollback", {"count": evt["count"]})
@@ -324,7 +392,7 @@ async def generate_stream(
             # progress event and not start another Best-of-N sample.
             cancel.set()
             raise
-        except _Cancelled:  # pragma: no cover — raised from the worker thread on cancellation; requires client-disconnect mid-stream.
+        except (GenerationCancelled, _Cancelled):  # pragma: no cover — raised from the worker thread on cancellation; requires client-disconnect mid-stream.
             yield _sse_event("error", {"detail": "Request cancelled"})
         except Exception as exc:  # pragma: no cover — unexpected worker-thread error; mocks don't raise.
             yield _sse_event("error", {"detail": str(exc)})

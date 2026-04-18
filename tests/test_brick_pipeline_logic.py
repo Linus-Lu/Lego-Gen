@@ -184,6 +184,19 @@ class TestPaletteValidation:
         assert _color_pattern() == r"[0-9A-Fa-f]{6}"
         assert _color_is_allowed("123abc") is True
 
+    def test_palette_helpers_fall_back_to_generic_hex_when_palette_data_is_malformed(self, monkeypatch):
+        import backend.inference.brick_pipeline as bp
+
+        class MalformedPalette:
+            def __iter__(self):
+                raise ValueError("bad json")
+
+        monkeypatch.setattr(bp, "ALLOWED_COLORS", MalformedPalette())
+
+        assert _allowed_color_list() is None
+        assert _color_pattern() == r"[0-9A-Fa-f]{6}"
+        assert _color_is_allowed("123abc") is True
+
 
 @pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
 def test_normalize_generate_step_result_rejects_unexpected_shape():

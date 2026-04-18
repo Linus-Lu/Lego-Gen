@@ -18,11 +18,19 @@ function formatAge(iso: string): string {
 }
 
 /** Tiny SVG isometric-ish brick stack, derived from brick coords. */
-function ThumbGraphic({ bricks }: { bricks: ReturnType<typeof parseBrickString> }) {
+function ThumbGraphic({
+  bricks,
+  invalid,
+}: {
+  bricks: ReturnType<typeof parseBrickString>;
+  invalid?: boolean;
+}) {
   if (!bricks.length) {
     return (
       <div className="w-full h-full bp-dot grid place-items-center">
-        <span className="mono text-[10px] text-[var(--color-mute)] tracking-[0.2em]">NO GEOMETRY</span>
+        <span className="mono text-[10px] text-[var(--color-mute)] tracking-[0.2em]">
+          {invalid ? 'INVALID DATA' : 'NO GEOMETRY'}
+        </span>
       </div>
     );
   }
@@ -97,8 +105,18 @@ function ThumbGraphic({ bricks }: { bricks: ReturnType<typeof parseBrickString> 
 export default function GalleryCard({ build, onStarUpdate, index = 0 }: GalleryCardProps) {
   const navigate = useNavigate();
   const [hover, setHover] = useState(0);
-  const stable = typeof build.stable === 'boolean' ? build.stable : !!build.stable;
-  const bricks = useMemo(() => parseBrickString(build.bricks), [build.bricks]);
+  const parsedBuild = useMemo(() => {
+    try {
+      return { bricks: parseBrickString(build.bricks), parseError: '' };
+    } catch (e) {
+      return {
+        bricks: [],
+        parseError: e instanceof Error ? e.message : 'Invalid brick data',
+      };
+    }
+  }, [build.bricks]);
+  const stable = !parsedBuild.parseError && (typeof build.stable === 'boolean' ? build.stable : !!build.stable);
+  const bricks = parsedBuild.bricks;
 
   const handleStar = async (stars: number) => {
     try {
@@ -119,13 +137,13 @@ export default function GalleryCard({ build, onStarUpdate, index = 0 }: GalleryC
         onClick={() => navigate(`/guide/${build.id}`)}
         className="block w-full aspect-[4/3] relative overflow-hidden border-b border-[var(--color-line)] cursor-pointer"
       >
-        <ThumbGraphic bricks={bricks} />
+        <ThumbGraphic bricks={bricks} invalid={Boolean(parsedBuild.parseError)} />
         <div className="absolute top-2 left-2 mono text-[9px] tracking-[0.2em] uppercase text-[var(--color-acid)]">
           BUILD / {build.id.slice(0, 6)}
         </div>
         <div className="absolute top-2 right-2 mono text-[9px] tracking-[0.2em] uppercase"
-             style={{ color: stable ? 'var(--color-acid)' : 'var(--color-heat)' }}>
-          {stable ? '■ STABLE' : '▲ UNSTABLE'}
+             style={{ color: parsedBuild.parseError ? 'var(--color-danger)' : stable ? 'var(--color-acid)' : 'var(--color-heat)' }}>
+          {parsedBuild.parseError ? 'ERR DATA' : stable ? '■ STABLE' : '▲ UNSTABLE'}
         </div>
         <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[var(--color-ink-2)] to-transparent h-8" />
       </button>
@@ -146,6 +164,11 @@ export default function GalleryCard({ build, onStarUpdate, index = 0 }: GalleryC
             {build.caption}
           </p>
         )}
+        {parsedBuild.parseError && (
+          <p className="mono text-[10px] tracking-[0.14em] uppercase text-[var(--color-danger)]">
+            {parsedBuild.parseError}
+          </p>
+        )}
 
         <div className="grid grid-cols-2 gap-0 border border-[var(--color-line)]">
           <div className="px-3 py-2 border-r border-[var(--color-line)]">
@@ -157,7 +180,7 @@ export default function GalleryCard({ build, onStarUpdate, index = 0 }: GalleryC
           <div className="px-3 py-2">
             <p className="tick">LAYERS</p>
             <p className="mono text-[14px] text-[var(--color-fg-strong)] tabular-nums">
-              {String(new Set(bricks.map(b => b.z)).size).padStart(2, '0')}
+              {parsedBuild.parseError ? 'ERR' : String(new Set(bricks.map(b => b.z)).size).padStart(2, '0')}
             </p>
           </div>
         </div>
