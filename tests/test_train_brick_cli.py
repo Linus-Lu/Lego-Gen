@@ -33,12 +33,46 @@ def test_train_brick_parser_exposes_v2_controls(tmp_path):
         "200",
         "--warmup-steps",
         "20",
+        "--learning-rate",
+        "0.0007",
+        "--lr-scheduler-type",
+        "linear",
+        "--weight-decay",
+        "0.01",
+        "--max-grad-norm",
+        "0.75",
+        "--optim",
+        "adamw_torch_fused",
+        "--max-seq-length",
+        "2048",
+        "--loss-chunk-tokens",
+        "512",
+        "--batch-size",
+        "3",
+        "--eval-batch-size",
+        "2",
         "--gradient-accumulation-steps",
         "2",
         "--tokenized-cache-dir",
         str(tmp_path / "token-cache"),
         "--rebuild-tokenized-cache",
         "--no-gradient-checkpointing",
+        "--torch-dtype",
+        "bfloat16",
+        "--attn-implementation",
+        "sdpa",
+        "--lora-r",
+        "16",
+        "--lora-alpha",
+        "32",
+        "--lora-dropout",
+        "0.1",
+        "--lora-target-modules",
+        "q_proj,k_proj,v_proj",
+        "--no-dora",
+        "--no-rslora",
+        "--seed",
+        "123",
         "--no-wandb",
     ])
 
@@ -52,10 +86,28 @@ def test_train_brick_parser_exposes_v2_controls(tmp_path):
     assert args.eval_steps == 100
     assert args.save_steps == 200
     assert args.warmup_steps == 20
+    assert args.learning_rate == 0.0007
+    assert args.lr_scheduler_type == "linear"
+    assert args.weight_decay == 0.01
+    assert args.max_grad_norm == 0.75
+    assert args.optim == "adamw_torch_fused"
+    assert args.max_seq_length == 2048
+    assert args.loss_chunk_tokens == 512
+    assert args.batch_size == 3
+    assert args.eval_batch_size == 2
     assert args.gradient_accumulation_steps == 2
     assert args.tokenized_cache_dir == tmp_path / "token-cache"
     assert args.rebuild_tokenized_cache is True
     assert args.no_gradient_checkpointing is True
+    assert args.torch_dtype == "bfloat16"
+    assert args.attn_implementation == "sdpa"
+    assert args.lora_r == 16
+    assert args.lora_alpha == 32
+    assert args.lora_dropout == 0.1
+    assert args.lora_target_modules == "q_proj,k_proj,v_proj"
+    assert args.no_dora is True
+    assert args.no_rslora is True
+    assert args.seed == 123
     assert args.no_wandb is True
 
 
@@ -76,6 +128,14 @@ def test_effective_warmup_steps_caps_short_gates():
 
     with pytest.raises(SystemExit):
         train_brick._effective_warmup_steps(0, 100)
+
+
+def test_parse_lora_targets_and_torch_dtype():
+    assert train_brick._parse_lora_target_modules("q_proj, v_proj,,") == ["q_proj", "v_proj"]
+    assert train_brick._resolve_torch_dtype("auto") == "auto"
+
+    with pytest.raises(SystemExit):
+        train_brick._parse_lora_target_modules(" , ")
 
 
 def test_select_dataset_subset_is_deterministic_and_bounded():
@@ -132,6 +192,7 @@ def test_tokenized_cache_metadata_changes_with_data(tmp_path):
         train_samples=10,
         eval_samples=5,
         train_include_tail=2,
+        seed=42,
     )
     train_path.write_text('{"messages": []}\n{"messages": []}\n', encoding="utf-8")
     metadata_b = train_brick._tokenized_cache_metadata(
@@ -141,6 +202,7 @@ def test_tokenized_cache_metadata_changes_with_data(tmp_path):
         train_samples=10,
         eval_samples=5,
         train_include_tail=2,
+        seed=42,
     )
 
     assert train_brick._tokenized_cache_key(metadata_a) != train_brick._tokenized_cache_key(metadata_b)

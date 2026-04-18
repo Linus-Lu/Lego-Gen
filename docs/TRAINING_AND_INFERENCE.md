@@ -154,7 +154,22 @@ python -m backend.training.train_brick \
   [--eval-samples 512]
   [--eval-steps 200]
   [--save-steps 200]
+  [--logging-steps 10]
+  [--learning-rate 1e-3]
+  [--lr-scheduler-type cosine]
+  [--max-seq-length 4096]
   [--gradient-accumulation-steps 16]
+  [--batch-size 1]
+  [--eval-batch-size 1]
+  [--loss-chunk-tokens 1024]
+  [--torch-dtype auto]
+  [--attn-implementation auto]
+  [--lora-r 32]
+  [--lora-alpha 64]
+  [--lora-dropout 0.05]
+  [--lora-target-modules q_proj,v_proj]
+  [--no-dora]
+  [--no-rslora]
   [--tokenized-cache-dir data/brick_training_v2/.tokenized_cache]
   [--rebuild-tokenized-cache]
   [--no-gradient-checkpointing]
@@ -172,6 +187,12 @@ append source-controlled v2 canary examples.
 `--train-samples` can bound fast canary gates. Step eval uses a deterministic
 subset (`--eval-samples`, default `512`) so checkpoint eval does not scan the
 entire test split every few hundred optimizer steps.
+
+**Experiment controls** — the trainer exposes the knobs used for speed/OOM
+tests without changing defaults: train/eval batch size, gradient accumulation,
+learning rate, scheduler, max sequence length, loss chunk size, model dtype,
+attention implementation, LoRA rank/alpha/dropout/targets, DoRA/rsLoRA, seed,
+optimizer, weight decay, and gradient clipping.
 
 **Tokenized cache** — by default, the trainer writes a deterministic tokenized
 dataset cache under `<data-dir>/.tokenized_cache/`, keyed by train/test file

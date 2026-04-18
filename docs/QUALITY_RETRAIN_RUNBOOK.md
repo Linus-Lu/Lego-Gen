@@ -109,6 +109,30 @@ On 96GB RTX PRO 6000 nodes, run a short speed/OOM test before full training with
 If that is stable, it should train faster than the 5090-safe checkpointing
 configuration.
 
+Example PRO 6000 speed test:
+
+```bash
+torchrun --nproc_per_node=8 -m backend.training.train_brick \
+  --data-dir data/brick_training_v2 \
+  --output-dir backend/models/checkpoints/qwen35-4b-brick-lora-v2-pro6000-bs2-test \
+  --max-steps 20 \
+  --train-samples 4096 \
+  --eval-samples 128 \
+  --eval-steps 100 \
+  --save-steps 100 \
+  --batch-size 2 \
+  --gradient-accumulation-steps 1 \
+  --no-gradient-checkpointing \
+  --resume none \
+  --save-total-limit 1 \
+  --no-wandb
+```
+
+If batch 2 is stable with comfortable VRAM, test batch 3 by changing only
+`--batch-size 3`. For global batch 24 experiments, consider lowering
+`--learning-rate` to `7e-4` or `8e-4` and compare quality artifacts before a
+full run.
+
 Evaluate promising checkpoints with both:
 
 ```bash

@@ -193,10 +193,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Run bounded eval every N optimizer steps")
     parser.add_argument("--save-steps", type=int, default=200,
                         help="Save checkpoints every N optimizer steps")
+    parser.add_argument("--logging-steps", type=int, default=10,
+                        help="Log training metrics every N optimizer steps")
     parser.add_argument("--warmup-steps", type=int, default=100,
                         help="Requested LR warmup steps; capped to 10%% for max-step gates")
+    parser.add_argument("--learning-rate", type=float, default=BRICK_LEARNING_RATE,
+                        help="Optimizer learning rate")
+    parser.add_argument("--lr-scheduler-type", type=str, default="cosine",
+                        help="Transformers LR scheduler name")
+    parser.add_argument("--weight-decay", type=float, default=0.0,
+                        help="AdamW weight decay")
+    parser.add_argument("--max-grad-norm", type=float, default=0.5,
+                        help="Gradient clipping norm")
+    parser.add_argument("--optim", type=str, default="adamw_torch",
+                        help="Transformers optimizer name")
+    parser.add_argument("--max-seq-length", type=int, default=BRICK_MAX_SEQ_LENGTH,
+                        help="Maximum token sequence length")
+    parser.add_argument("--loss-chunk-tokens", type=int, default=LOSS_CHUNK_TOKENS,
+                        help="Token chunk size for structure-weighted CE")
     parser.add_argument("--batch-size", type=int, default=BRICK_BATCH_SIZE,
                         help="Per-device train batch size")
+    parser.add_argument("--eval-batch-size", type=int, default=1,
+                        help="Per-device eval batch size")
     parser.add_argument("--gradient-accumulation-steps", type=int,
                         default=BRICK_GRADIENT_ACCUMULATION,
                         help="Gradient accumulation steps")
@@ -212,6 +230,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Disable pre-tokenization cache and let SFTTrainer tokenize every run")
     parser.add_argument("--no-gradient-checkpointing", action="store_true",
                         help="Disable gradient checkpointing; faster but uses more VRAM")
+    parser.add_argument("--torch-dtype", choices=["auto", "bfloat16", "float16", "float32"],
+                        default="auto", help="Model load dtype")
+    parser.add_argument(
+        "--attn-implementation",
+        choices=["auto", "eager", "sdpa", "flash_attention_2"],
+        default="auto",
+        help="Transformers attention implementation",
+    )
+    parser.add_argument("--lora-r", type=int, default=BRICK_LORA_R,
+                        help="LoRA rank")
+    parser.add_argument("--lora-alpha", type=int, default=BRICK_LORA_ALPHA,
+                        help="LoRA alpha")
+    parser.add_argument("--lora-dropout", type=float, default=BRICK_LORA_DROPOUT,
+                        help="LoRA dropout")
+    parser.add_argument("--lora-target-modules", type=str, default="q_proj,v_proj",
+                        help="Comma-separated LoRA target modules")
+    parser.add_argument("--no-dora", action="store_true",
+                        help="Disable DoRA in the LoRA adapter")
+    parser.add_argument("--no-rslora", action="store_true",
+                        help="Disable rsLoRA in the LoRA adapter")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                        help="Training and deterministic subset seed")
     parser.add_argument("--save-total-limit", type=int, default=5,
                         help="How many recent checkpoints to retain")
     parser.add_argument("--no-wandb", action="store_true",
@@ -252,6 +292,28 @@ def _effective_warmup_steps(max_steps: int | None, requested_warmup_steps: int) 
     # Canary gates should spend some steps at a useful learning rate instead of
     # ending entirely inside the default 100-step warmup.
     return min(requested_warmup_steps, max(1, max_steps // 10))
+
+
+def _validate_nonnegative(name: str, value: float) -> None:
+    if value < 0:
+        raise SystemExit(f"--{name} must be non-negative")
+
+
+def _parse_lora_target_modules(value: str) -> list[str]:
+    modules = [module.strip() for module in value.split(",") if module.strip()]
+    if not modules:
+        raise SystemExit("--lora-target-modules must include at least one module")
+    return modules
+
+
+def _resolve_torch_dtype(value: str):
+    if value == "auto":
+        return "auto"
+    return {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }[value]
 
 
 def _select_dataset_subset(
@@ -316,6 +378,7 @@ def _tokenized_cache_metadata(
     train_samples: int | None,
     eval_samples: int | None,
     train_include_tail: int,
+    seed: int,
 ) -> dict:
     return {
         "version": TOKENIZED_CACHE_VERSION,
@@ -330,9 +393,9 @@ def _tokenized_cache_metadata(
             "sha256": _file_sha256(test_path),
         },
         "selection": {
-            "seed": DEFAULT_SEED,
+            "seed": seed,
             "train_samples": train_samples,
-            "eval_seed": DEFAULT_SEED + 1,
+            "eval_seed": seed + 1,
             "eval_samples": eval_samples,
             "train_include_tail": train_include_tail,
         },
@@ -441,12 +504,24 @@ def main() -> None:
     for flag_name in [
         "eval-steps",
         "save-steps",
+        "logging-steps",
         "batch-size",
+        "eval-batch-size",
         "gradient-accumulation-steps",
         "eval-accumulation-steps",
+        "max-seq-length",
+        "loss-chunk-tokens",
+        "lora-r",
+        "lora-alpha",
         "save-total-limit",
     ]:
         _validate_positive(flag_name, getattr(args, flag_name.replace("-", "_")))
+    _validate_nonnegative("learning-rate", args.learning_rate)
+    _validate_nonnegative("weight-decay", args.weight_decay)
+    _validate_nonnegative("max-grad-norm", args.max_grad_norm)
+    _validate_nonnegative("lora-dropout", args.lora_dropout)
+    if args.lora_dropout > 1:
+        raise SystemExit("--lora-dropout must be <= 1")
     if args.dataloader_num_workers < 0:
         raise SystemExit("--dataloader-num-workers must be non-negative")
     if args.save_steps % args.eval_steps != 0:
@@ -495,12 +570,12 @@ def main() -> None:
     train_ds = _select_dataset_subset(
         ds["train"],
         args.train_samples,
-        seed=DEFAULT_SEED,
+        seed=args.seed,
         name="train",
         include_tail=256 if args.train_samples is not None else 0,
     )
     eval_ds = _select_dataset_subset(
-        ds["test"], args.eval_samples, seed=DEFAULT_SEED + 1, name="eval"
+        ds["test"], args.eval_samples, seed=args.seed + 1, name="eval"
     )
     if not args.no_tokenized_cache:
         train_include_tail = 256 if args.train_samples is not None else 0
@@ -511,6 +586,7 @@ def main() -> None:
             train_samples=args.train_samples,
             eval_samples=args.eval_samples,
             train_include_tail=train_include_tail,
+            seed=args.seed,
         )
         train_ds, eval_ds = _load_or_create_tokenized_datasets(
             train_ds=train_ds,
@@ -524,8 +600,15 @@ def main() -> None:
         print("Tokenized dataset cache disabled; SFTTrainer will tokenize datasets.", flush=True)
 
     print(f"Loading model: {BRICK_MODEL_NAME}", flush=True)
+    model_kwargs = {
+        "torch_dtype": _resolve_torch_dtype(args.torch_dtype),
+        "trust_remote_code": True,
+    }
+    if args.attn_implementation != "auto":
+        model_kwargs["attn_implementation"] = args.attn_implementation
     model = AutoModelForCausalLM.from_pretrained(
-        BRICK_MODEL_NAME, torch_dtype="auto", trust_remote_code=True,
+        BRICK_MODEL_NAME,
+        **model_kwargs,
     )
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = False
@@ -536,12 +619,13 @@ def main() -> None:
     # residual weights — the stacked init produces unstable training.
     # Stick with standard Kaiming init plus DoRA + rsLoRA, matching Stage 1.
     lora_config = LoraConfig(
-        r=BRICK_LORA_R, lora_alpha=BRICK_LORA_ALPHA,
-        lora_dropout=BRICK_LORA_DROPOUT,
-        target_modules=["q_proj", "v_proj"],
+        r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        target_modules=_parse_lora_target_modules(args.lora_target_modules),
         task_type="CAUSAL_LM",
-        use_dora=True,
-        use_rslora=True,
+        use_dora=not args.no_dora,
+        use_rslora=not args.no_rslora,
     )
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
@@ -563,17 +647,18 @@ def main() -> None:
         output_dir=output_dir,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=1,
+        per_device_eval_batch_size=args.eval_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=BRICK_LEARNING_RATE,
-        lr_scheduler_type="cosine",
+        learning_rate=args.learning_rate,
+        lr_scheduler_type=args.lr_scheduler_type,
         warmup_steps=warmup_steps,
-        max_grad_norm=0.5,
-        optim="adamw_torch",
+        weight_decay=args.weight_decay,
+        max_grad_norm=args.max_grad_norm,
+        optim=args.optim,
         bf16=USE_BF16,
         fp16=not USE_BF16 and torch.cuda.is_available(),
         gradient_checkpointing=gradient_checkpointing,
-        logging_steps=10,
+        logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
         eval_strategy="steps",
@@ -584,6 +669,7 @@ def main() -> None:
         report_to="none" if args.no_wandb else "wandb",
         dataloader_pin_memory=True,
         dataloader_num_workers=args.dataloader_num_workers,
+        seed=args.seed,
     )
     if args.max_steps is not None:
         if args.max_steps <= 0:
@@ -606,9 +692,9 @@ def main() -> None:
         if key in config_params:
             config_kwargs[key] = value
     if "max_seq_length" in config_params:
-        config_kwargs["max_seq_length"] = BRICK_MAX_SEQ_LENGTH
+        config_kwargs["max_seq_length"] = args.max_seq_length
     elif "max_length" in config_params:
-        config_kwargs["max_length"] = BRICK_MAX_SEQ_LENGTH
+        config_kwargs["max_length"] = args.max_seq_length
     if "dataset_text_field" in config_params:
         config_kwargs["dataset_text_field"] = None
 
@@ -639,8 +725,8 @@ def main() -> None:
             vocab_size = logits.size(-1)
             loss_sum = torch.zeros((), device=logits.device, dtype=torch.float32)
             weight_sum = weights.sum().to(device=logits.device, dtype=torch.float32).clamp(min=1.0)
-            for start in range(0, seq_len, LOSS_CHUNK_TOKENS):
-                end = min(start + LOSS_CHUNK_TOKENS, seq_len)
+            for start in range(0, seq_len, args.loss_chunk_tokens):
+                end = min(start + args.loss_chunk_tokens, seq_len)
                 chunk_logits = logits[:, start:end, :].reshape(-1, vocab_size)
                 chunk_labels = shift_labels[:, start:end].reshape(-1)
                 chunk_weights = weights[:, start:end].reshape(-1).to(
@@ -683,7 +769,7 @@ def main() -> None:
 
     # Pass max_seq_length to trainer if config didn't accept it
     if "max_seq_length" in trainer_params and "max_seq_length" not in config_kwargs:
-        trainer_kwargs["max_seq_length"] = BRICK_MAX_SEQ_LENGTH
+        trainer_kwargs["max_seq_length"] = args.max_seq_length
 
     trainer = BrickTrainer(**trainer_kwargs)
 
