@@ -137,6 +137,48 @@ class TestGenerateBricks:
         assert resp.status_code == 422
         assert "stable" in resp.json()["detail"].lower()
 
+    def test_generate_bricks_text_path_passes_progress_callback(self, monkeypatch, client):
+        import backend.inference.brick_pipeline as bp
+
+        seen = {"callback": None}
+
+        def callback_generate(self, caption, on_progress=None):
+            seen["callback"] = on_progress
+            return {
+                "bricks": "2x4 (0,0,0) #C91A09",
+                "brick_count": 1,
+                "stable": True,
+                "metadata": {"model_version": "mock", "rejections": 0, "rollbacks": 0},
+            }
+
+        monkeypatch.setattr(bp.MockBrickPipeline, "generate", callback_generate)
+        resp = client.post("/api/generate-bricks", data={"prompt": "callback test"})
+        assert resp.status_code == 200
+        assert seen["callback"] is not None
+
+    def test_generate_bricks_image_path_passes_progress_callback(self, monkeypatch, client):
+        import backend.inference.brick_pipeline as bp
+
+        seen = {"callback": None}
+
+        def callback_generate_from_image(self, image, on_progress=None):
+            seen["callback"] = on_progress
+            return {
+                "bricks": "2x4 (0,0,0) #C91A09",
+                "caption": "a red house",
+                "brick_count": 1,
+                "stable": True,
+                "metadata": {"model_version": "mock", "rejections": 0, "rollbacks": 0},
+            }
+
+        monkeypatch.setattr(bp.MockBrickPipeline, "generate_from_image", callback_generate_from_image)
+        resp = client.post(
+            "/api/generate-bricks",
+            files={"image": ("test.png", _make_png_bytes(), "image/png")},
+        )
+        assert resp.status_code == 200
+        assert seen["callback"] is not None
+
 
 class TestGenerateStream:
     def test_image_stream_emits_events(self, client):
@@ -248,6 +290,55 @@ class TestGallery:
             json={"title": "Empty", "caption": "", "bricks": ""},
         )
         assert resp.status_code == 400
+
+    def test_validated_bricks_rejects_empty_sequence_directly(self):
+        from fastapi import HTTPException
+        from backend.api.routes_gallery import _validated_bricks
+
+        with pytest.raises(HTTPException) as excinfo:
+            _validated_bricks(" \n ")
+        assert excinfo.value.status_code == 400
+        assert "must not be empty" in excinfo.value.detail
+
+    def test_invalid_brick_text_rejected(self, client):
+        resp = client.post(
+            "/api/gallery",
+            json={"title": "Bad", "caption": "", "bricks": "nonsense"},
+        )
+        assert resp.status_code == 400
+        assert "valid brick lines" in resp.json()["detail"]
+
+    def test_invalid_geometry_rejected(self, client):
+        resp = client.post(
+            "/api/gallery",
+            json={
+                "title": "Overlap",
+                "caption": "",
+                "bricks": "2x4 (0,0,0) #C91A09\n2x4 (0,0,0) #0055BF",
+            },
+        )
+        assert resp.status_code == 400
+        assert "invalid placement" in resp.json()["detail"]
+
+    def test_gallery_recomputes_brick_count_and_stability(self, monkeypatch, client):
+        from backend.api import routes_gallery as rg
+
+        monkeypatch.setattr(rg, "is_stable", lambda bricks: False)
+
+        resp = client.post(
+            "/api/gallery",
+            json={
+                "title": "Client Lies",
+                "caption": "ignored metadata",
+                "bricks": "2x4 (0,0,0) #C91A09",
+                "brick_count": 99,
+                "stable": True,
+            },
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["brick_count"] == 1
+        assert data["stable"] is False
 
     def test_get_nonexistent_returns_404(self, client):
         resp = client.get("/api/gallery/nonexistent_id")
@@ -431,6 +522,34 @@ class TestCancelToken:
             tok.check_callback({"type": "brick"})
 
 
+class TestCallWithSupportedKwargs:
+    def test_helper_keeps_kwargs_when_signature_is_unavailable(self, monkeypatch):
+        from backend.api import routes_generate as rg
+
+        monkeypatch.setattr(
+            rg.inspect,
+            "signature",
+            lambda fn: (_ for _ in ()).throw(ValueError("boom")),
+        )
+
+        def target(*args, **kwargs):
+            return args, kwargs
+
+        args, kwargs = rg._call_with_supported_kwargs(target, 1, keep=2)
+        assert args == (1,)
+        assert kwargs == {"keep": 2}
+
+    def test_helper_preserves_var_keyword_functions(self):
+        from backend.api import routes_generate as rg
+
+        def target(*args, **kwargs):
+            return args, kwargs
+
+        args, kwargs = rg._call_with_supported_kwargs(target, 1, keep=2, extra=3)
+        assert args == (1,)
+        assert kwargs == {"keep": 2, "extra": 3}
+
+
 class TestStreamImageBestOfN:
     def test_stream_with_image_and_n_uses_from_image_bon(self, client):
         """Image + n>1 stream path hits _from_image_bon inside the thread (line 226)."""
@@ -460,8 +579,65 @@ class TestFromImageBonDirect:
         assert "caption" in result
         assert result["metadata"]["n"] == 2
 
+    def test_from_image_bon_forwards_should_cancel(self, monkeypatch):
+        from backend.api.routes_generate import _from_image_bon
+        from PIL import Image
+
+        seen = {"stage1_should_cancel": None, "bon_should_cancel": None}
+
+        class StubStage1:
+            def describe(self, image, *, should_cancel=None):
+                seen["stage1_should_cancel"] = should_cancel
+                return "a red house"
+
+        class StubPipeline:
+            def generate_best_of_n(self, caption, n=1, on_progress=None, *, should_cancel=None):
+                seen["bon_should_cancel"] = should_cancel
+                return {
+                    "bricks": "2x4 (0,0,0) #C91A09",
+                    "brick_count": 1,
+                    "stable": True,
+                    "metadata": {"n": n},
+                }
+
+        monkeypatch.setattr("backend.inference.brick_pipeline._get_stage1_pipeline", lambda: StubStage1())
+        should_cancel = lambda: False
+
+        result = _from_image_bon(
+            StubPipeline(),
+            Image.new("RGB", (32, 32)),
+            n=2,
+            should_cancel=should_cancel,
+        )
+
+        assert result["caption"] == "a red house"
+        assert seen["stage1_should_cancel"] is should_cancel
+        assert seen["bon_should_cancel"] is should_cancel
+
 
 class TestStreamRollbackAndUnknownEvents:
+    def test_stream_emits_rejection_event(self, monkeypatch, client):
+        """Mock generate() to push a rejection progress event through the SSE
+        loop so the cumulative rejection counter is surfaced to the UI."""
+        from backend.inference import brick_pipeline as bp
+
+        def generate_with_rejection(self, caption, on_progress=None):
+            if on_progress is not None:
+                on_progress({"type": "rejection", "count": 2})
+                on_progress({"type": "brick", "count": 1})
+            return {
+                "bricks": "2x4 (0,0,0) #C91A09",
+                "brick_count": 1,
+                "stable": True,
+                "metadata": {"model_version": "mock", "rejections": 2},
+            }
+
+        monkeypatch.setattr(bp.MockBrickPipeline, "generate", generate_with_rejection)
+        resp = client.post("/api/generate-stream", data={"prompt": "rejection test"})
+        assert resp.status_code == 200
+        assert "event: rejection" in resp.text
+        assert "event: result" in resp.text
+
     def test_stream_emits_rollback_event(self, monkeypatch, client):
         """Mock generate() to push a rollback progress event through the SSE
         loop so the 'rollback' branch (lines 274-275) is covered."""

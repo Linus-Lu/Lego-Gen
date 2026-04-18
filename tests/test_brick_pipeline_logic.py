@@ -33,7 +33,9 @@ try:
         MAX_ROLLBACKS,
         STEP_PATTERN,
         BrickPipeline,
+        _build_grammar_pattern,
         _allowed_color_list,
+        _call_with_supported_kwargs,
         _color_is_allowed,
         _color_pattern,
         _normalize_generate_step_result,
@@ -127,8 +129,8 @@ class TestGrammarPattern:
         assert pat.fullmatch("2x4 (0,0,0) #C91A0\n") is None     # short hex
         assert pat.fullmatch("") is None
 
-    def test_rejects_colors_outside_palette(self):
-        pat = re.compile(BRICK_PATTERN)
+    def test_rejects_colors_outside_palette(self, seeded_palette):
+        pat = re.compile(_build_grammar_pattern())
         assert pat.fullmatch("2x4 (0,0,0) #123456\n") is None
 
     def test_grammar_matches_are_parseable_by_backend_regex(self):
@@ -165,6 +167,11 @@ class TestStepGrammarPattern:
 
 @pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
 class TestPaletteValidation:
+    def test_color_pattern_uses_seeded_palette(self, seeded_palette):
+        pattern = _color_pattern()
+        assert "C91A09" in pattern
+        assert "0055BF" in pattern
+
     def test_palette_accepts_known_color(self):
         assert _color_is_allowed("C91A09") is True
 
@@ -184,11 +191,62 @@ class TestPaletteValidation:
         assert _color_pattern() == r"[0-9A-Fa-f]{6}"
         assert _color_is_allowed("123abc") is True
 
+    def test_palette_helpers_fall_back_to_generic_hex_when_palette_data_is_malformed(self, monkeypatch):
+        import backend.inference.brick_pipeline as bp
+
+        class MalformedPalette:
+            def __iter__(self):
+                raise ValueError("bad json")
+
+        monkeypatch.setattr(bp, "ALLOWED_COLORS", MalformedPalette())
+
+        assert _allowed_color_list() is None
+        assert _color_pattern() == r"[0-9A-Fa-f]{6}"
+        assert _color_is_allowed("123abc") is True
+
 
 @pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
 def test_normalize_generate_step_result_rejects_unexpected_shape():
     with pytest.raises(TypeError, match="Unexpected _generate_one_brick result"):
         _normalize_generate_step_result("not a tuple")
+
+
+@pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
+def test_normalize_generate_step_result_accepts_three_tuple():
+    assert _normalize_generate_step_result((None, 2, "done")) == (None, 2, "done")
+
+
+@pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
+def test_normalize_generate_step_result_upgrades_legacy_two_tuple():
+    assert _normalize_generate_step_result((None, 2)) == (None, 2, None)
+
+
+@pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
+def test_call_with_supported_kwargs_keeps_kwargs_when_signature_is_unavailable(monkeypatch):
+    import backend.inference.brick_pipeline as bp
+
+    monkeypatch.setattr(
+        bp.inspect,
+        "signature",
+        lambda fn: (_ for _ in ()).throw(ValueError("boom")),
+    )
+
+    def target(*args, **kwargs):
+        return args, kwargs
+
+    args, kwargs = _call_with_supported_kwargs(target, 1, keep=2)
+    assert args == (1,)
+    assert kwargs == {"keep": 2}
+
+
+@pytest.mark.skipif(not _MODULE_IMPORTABLE, reason="brick_pipeline module not importable")
+def test_call_with_supported_kwargs_preserves_var_keyword_functions():
+    def target(*args, **kwargs):
+        return args, kwargs
+
+    args, kwargs = _call_with_supported_kwargs(target, 1, keep=2, extra=3)
+    assert args == (1,)
+    assert kwargs == {"keep": 2, "extra": 3}
 
 
 

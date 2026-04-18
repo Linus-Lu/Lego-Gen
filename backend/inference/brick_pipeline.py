@@ -4,6 +4,7 @@ Also exposes the top-level factory get_brick_pipeline() used by the API routes,
 and a MockBrickPipeline for dev mode (LEGOGEN_DEV=1).
 """
 
+import inspect
 import re
 import threading
 import time
@@ -15,6 +16,10 @@ from backend.brick.parser import Brick, parse_brick, parse_brick_sequence, seria
 from backend.brick.occupancy import VoxelGrid
 from backend.brick.stability import is_stable, find_first_unstable
 from backend.config import BRICK_MODEL_NAME, BRICK_CHECKPOINT_DIR, LEGOGEN_DEV
+from backend.inference.cancellation import (
+    build_stopping_criteria,
+    raise_if_cancelled,
+)
 from backend.inference.best_of_n import rank_candidates, cluster_and_pick
 
 
@@ -36,7 +41,7 @@ def _allowed_color_list() -> Optional[list[str]]:
     """
     try:
         colors = [color.upper() for color in ALLOWED_COLORS]
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return None
     return colors or None
 
@@ -110,6 +115,18 @@ def _normalize_generate_step_result(raw) -> tuple[Optional[Brick], int, Optional
     raise TypeError(f"Unexpected _generate_one_brick result: {raw!r}")
 
 
+def _call_with_supported_kwargs(fn, /, *args, **kwargs):
+    """Call *fn* while dropping kwargs that its signature does not accept."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return fn(*args, **kwargs)
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()):
+        return fn(*args, **kwargs)
+    supported = {key: value for key, value in kwargs.items() if key in params}
+    return fn(*args, **supported)
+
+
 class BrickPipeline:
     """Qwen3.5-4B + brick LoRA. Generates structurally-stable brick sequences.
 
@@ -165,10 +182,12 @@ class BrickPipeline:
         max_bricks: int | None = None,
         max_seconds: float | None = None,
         stability_check_interval: int | None = None,
+        should_cancel=None,
     ) -> dict:  # pragma: no cover — runs the real torch model; MockBrickPipeline.generate covers the shape.
         """Generate a brick structure for *caption*.
 
         If ``on_progress`` is provided, it is called with events of the form:
+          {"type": "rejection", "count": int}
           {"type": "brick", "count": int}
           {"type": "rollback", "count": int}
         """
@@ -185,10 +204,13 @@ class BrickPipeline:
         start_monotonic = time.monotonic()
         deadline = start_monotonic + max_seconds if max_seconds is not None else None
         effective_max_bricks = MAX_BRICKS if max_bricks is None else max_bricks
+        if should_cancel is None:
+            should_cancel = getattr(self, "_should_cancel", None)
 
         def time_exceeded() -> bool:
             return deadline is not None and time.monotonic() >= deadline
 
+        raise_if_cancelled(should_cancel)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": USER_TEMPLATE.format(caption=caption)},
@@ -225,7 +247,9 @@ class BrickPipeline:
         hit_done = False
 
         for _ in range(MAX_ROLLBACKS):
+            raise_if_cancelled(should_cancel)
             while len(bricks) < effective_max_bricks:
+                raise_if_cancelled(should_cancel)
                 if time_exceeded():
                     hit_max_seconds = True
                     termination_reason = "max_seconds"
@@ -238,6 +262,8 @@ class BrickPipeline:
                     )
                 )
                 total_rejections += rej
+                if rej > 0 and on_progress is not None:
+                    on_progress({"type": "rejection", "count": total_rejections})
                 if brick is None:
                     termination_reason = stop_reason or "eos"
                     hit_done = hit_done or stop_reason == "done"
@@ -271,6 +297,7 @@ class BrickPipeline:
 
             if hit_max_seconds:
                 break
+            raise_if_cancelled(should_cancel)
             if is_stable(bricks):
                 break
             if hit_max_bricks and max_bricks is not None:
@@ -297,6 +324,7 @@ class BrickPipeline:
             if on_progress is not None:
                 on_progress({"type": "rollback", "count": total_rollbacks})
 
+        raise_if_cancelled(should_cancel)
         final_stable = is_stable(bricks)
         if not final_stable and total_rollbacks >= MAX_ROLLBACKS:
             termination_reason = "max_rollbacks"
@@ -337,6 +365,7 @@ class BrickPipeline:
         max_bricks: int | None = None,
         max_seconds: float | None = None,
         stability_check_interval: int | None = None,
+        should_cancel=None,
     ) -> dict:  # pragma: no cover — calls real generate(); BoN logic covered via MockBrickPipeline / __new__ stubs.
         """Run generate() n times and return the chosen sample.
 
@@ -344,20 +373,30 @@ class BrickPipeline:
         strategy="cluster" -> cluster_and_pick on stable set (falls back to rank)
         """
         candidates: list[dict] = []
+        if should_cancel is None:
+            should_cancel = getattr(self, "_should_cancel", None)
         for i in range(n):
+            raise_if_cancelled(should_cancel)
             if (
                 max_bricks is None
                 and max_seconds is None
                 and stability_check_interval is None
             ):
-                sample = self.generate(caption, on_progress=None)
+                sample = _call_with_supported_kwargs(
+                    self.generate,
+                    caption,
+                    on_progress=None,
+                    should_cancel=should_cancel,
+                )
             else:
-                sample = self.generate(
+                sample = _call_with_supported_kwargs(
+                    self.generate,
                     caption,
                     on_progress=None,
                     max_bricks=max_bricks,
                     max_seconds=max_seconds,
                     stability_check_interval=stability_check_interval,
+                    should_cancel=should_cancel,
                 )
             sample["bricks_parsed"] = parse_brick_sequence(sample["bricks"])
             # Stamp the sample's original index so we don't have to recover it
@@ -391,12 +430,24 @@ class BrickPipeline:
         picked["metadata"]["selection_strategy"] = strategy
         return picked
 
-    def generate_from_image(self, image, on_progress=None) -> dict:  # pragma: no cover — chains real Stage1 + Stage2 pipelines; mock counterpart covers the wiring.
+    def generate_from_image(self, image, on_progress=None, *, should_cancel=None) -> dict:  # pragma: no cover — chains real Stage1 + Stage2 pipelines; mock counterpart covers the wiring.
         """Two-stage: image → Stage 1 caption → brick sequence."""
-        caption = _get_stage1_pipeline().describe(image)
+        if should_cancel is None:
+            should_cancel = getattr(self, "_should_cancel", None)
+        raise_if_cancelled(should_cancel)
+        caption = _call_with_supported_kwargs(
+            _get_stage1_pipeline().describe,
+            image,
+            should_cancel=should_cancel,
+        )
         if on_progress is not None:
             on_progress({"type": "caption", "caption": caption})
-        result = self.generate(caption, on_progress=on_progress)
+        result = _call_with_supported_kwargs(
+            self.generate,
+            caption,
+            on_progress=on_progress,
+            should_cancel=should_cancel,
+        )
         result["caption"] = caption
         return result
 
@@ -405,6 +456,7 @@ class BrickPipeline:
     ) -> tuple[Optional[Brick], int, Optional[str]]:  # pragma: no cover — invokes self.model.generate() on a real transformer.
         import torch
 
+        should_cancel = getattr(self, "_should_cancel", None)
         gen_kwargs = dict(
             max_new_tokens=30,
             temperature=BASE_TEMPERATURE,
@@ -415,6 +467,7 @@ class BrickPipeline:
         )
 
         for attempt in range(MAX_REJECTIONS):
+            raise_if_cancelled(should_cancel)
             current_logits_processor = (
                 logits_processor() if callable(logits_processor) else logits_processor
             )
@@ -422,8 +475,14 @@ class BrickPipeline:
                 gen_kwargs["logits_processor"] = [current_logits_processor]
             else:
                 gen_kwargs.pop("logits_processor", None)
+            stopping_criteria = build_stopping_criteria(should_cancel)
+            if stopping_criteria is not None:
+                gen_kwargs["stopping_criteria"] = stopping_criteria
+            else:
+                gen_kwargs.pop("stopping_criteria", None)
             with torch.no_grad():
                 out = self.model.generate(input_ids, **gen_kwargs)
+            raise_if_cancelled(should_cancel)
             text = self.tokenizer.decode(
                 out[0, input_ids.shape[1]:], skip_special_tokens=False
             )
@@ -485,8 +544,12 @@ class MockBrickPipeline:
         max_bricks: int | None = None,
         max_seconds: float | None = None,
         stability_check_interval: int | None = None,
+        should_cancel=None,
     ) -> dict:
         t0 = time.time()
+        if should_cancel is None:
+            should_cancel = getattr(self, "_should_cancel", None)
+        raise_if_cancelled(should_cancel)
         if max_bricks is not None and max_bricks < 0:
             raise ValueError("max_bricks must be non-negative")
         if max_seconds is not None and max_seconds < 0:
@@ -498,6 +561,7 @@ class MockBrickPipeline:
         hit_max_seconds = max_seconds == 0
         limit = len(self._HOUSE_BRICKS) if max_bricks is None else min(max_bricks, len(self._HOUSE_BRICKS))
         for i, (dims, x, y, z, color) in enumerate(self._HOUSE_BRICKS[:limit]):
+            raise_if_cancelled(should_cancel)
             if hit_max_seconds:
                 break
             lines.append(f"{dims} ({x},{y},{z}) {color}")
@@ -544,13 +608,18 @@ class MockBrickPipeline:
         max_bricks: int | None = None,
         max_seconds: float | None = None,
         stability_check_interval: int | None = None,
+        should_cancel=None,
     ) -> dict:
+        if should_cancel is None:
+            should_cancel = getattr(self, "_should_cancel", None)
+        raise_if_cancelled(should_cancel)
         result = self.generate(
             caption,
             on_progress=on_progress,
             max_bricks=max_bricks,
             max_seconds=max_seconds,
             stability_check_interval=stability_check_interval,
+            should_cancel=should_cancel,
         )
         result.setdefault("metadata", {})
         result["metadata"]["n"] = n
@@ -559,11 +628,14 @@ class MockBrickPipeline:
         result["metadata"]["selection_strategy"] = strategy
         return result
 
-    def generate_from_image(self, image, on_progress=None) -> dict:
+    def generate_from_image(self, image, on_progress=None, *, should_cancel=None) -> dict:
+        if should_cancel is None:
+            should_cancel = getattr(self, "_should_cancel", None)
+        raise_if_cancelled(should_cancel)
         caption = "a small red house with a dark red tiled roof"
         if on_progress is not None:
             on_progress({"type": "caption", "caption": caption})
-        result = self.generate(caption, on_progress=on_progress)
+        result = self.generate(caption, on_progress=on_progress, should_cancel=should_cancel)
         result["caption"] = caption
         return result
 
@@ -602,5 +674,8 @@ def _get_stage1_pipeline():
 
 
 class _MockStage1:
-    def describe(self, image) -> str:
+    def describe(self, image, *, should_cancel=None) -> str:
+        if should_cancel is None:
+            should_cancel = getattr(self, "_should_cancel", None)
+        raise_if_cancelled(should_cancel)
         return "a small red house with a dark red tiled roof"

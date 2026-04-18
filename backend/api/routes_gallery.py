@@ -5,6 +5,9 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from backend.brick.occupancy import VoxelGrid
+from backend.brick.parser import parse_brick_sequence
+from backend.brick.stability import is_stable
 from backend.storage.gallery_db import (
     create_build,
     get_build,
@@ -36,6 +39,26 @@ class StarRequest(BaseModel):
     stars: int = Field(ge=1, le=5)
 
 
+def _validated_bricks(raw: str):
+    try:
+        bricks = parse_brick_sequence(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="bricks must contain valid brick lines") from exc
+
+    if not bricks:
+        raise HTTPException(status_code=400, detail="bricks must not be empty")
+
+    grid = VoxelGrid()
+    for index, brick in enumerate(bricks, start=1):
+        if not grid.can_place(brick):
+            raise HTTPException(
+                status_code=400,
+                detail=f"bricks contain an invalid placement at line {index}",
+            )
+        grid.place(brick)
+    return bricks
+
+
 @router.get("/gallery")
 async def list_gallery(
     sort: str = "newest",
@@ -48,12 +71,13 @@ async def list_gallery(
 async def create_gallery_build(req: CreateBuildRequest):
     if not req.bricks.strip():
         raise HTTPException(status_code=400, detail="bricks must not be empty")
+    bricks = _validated_bricks(req.bricks)
     return await create_build(
         title=req.title,
         caption=req.caption,
         bricks=req.bricks,
-        brick_count=req.brick_count,
-        stable=req.stable,
+        brick_count=len(bricks),
+        stable=is_stable(bricks),
         thumbnail_b64=req.thumbnail_b64,
     )
 

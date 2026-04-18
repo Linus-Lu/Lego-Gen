@@ -5,7 +5,9 @@ import {
   bricksToLayers,
   generateBricks,
   downloadLDraw,
+  getPromptValidationError,
   listGalleryBuilds,
+  MAX_PROMPT_CHARS,
   createGalleryBuild,
   getGalleryBuild,
   starGalleryBuild,
@@ -31,11 +33,15 @@ describe('parseBrickString', () => {
     expect(out[1]).toEqual({ h: 1, w: 1, x: 5, y: 5, z: 2, color: '#FFFFFF' });
   });
 
-  it('skips lines that do not match the grammar', () => {
+  it('throws on the first line that does not match the grammar', () => {
     const raw = '2x4 (0,0,0) #C91A09\nnonsense\n1x1 (1,1,1) #000000';
-    const out = parseBrickString(raw);
-    expect(out).toHaveLength(2);
-    expect(out.map(b => b.color)).toEqual(['#C91A09', '#000000']);
+    expect(() => parseBrickString(raw)).toThrow('Invalid brick line at 2');
+  });
+
+  it('rejects lines with trailing junk', () => {
+    expect(() => parseBrickString('2x4 (0,0,0) #C91A09 extra')).toThrow(
+      'Invalid brick line at 1',
+    );
   });
 
   it('tolerates surrounding whitespace per line', () => {
@@ -77,6 +83,19 @@ describe('bricksToLayers', () => {
     const { steps, zLevels } = bricksToLayers([]);
     expect(steps).toEqual([]);
     expect(zLevels).toEqual([]);
+  });
+});
+
+describe('getPromptValidationError', () => {
+  it('returns null at and below the shared prompt limit', () => {
+    expect(getPromptValidationError('x'.repeat(MAX_PROMPT_CHARS))).toBeNull();
+    expect(getPromptValidationError('small house')).toBeNull();
+  });
+
+  it('returns the shared limit message above the cap', () => {
+    expect(getPromptValidationError('x'.repeat(MAX_PROMPT_CHARS + 1))).toBe(
+      `Prompt exceeds ${MAX_PROMPT_CHARS} characters`,
+    );
   });
 });
 
@@ -171,6 +190,14 @@ describe('Gallery client', () => {
     expect(url).not.toContain('?');
   });
 
+  it('listGalleryBuilds forwards AbortSignal to fetch', async () => {
+    fetchMock.mockResolvedValueOnce(mockFetchResponse([]));
+    const controller = new AbortController();
+    await listGalleryBuilds({ sort: 'newest' }, controller.signal);
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.signal).toBe(controller.signal);
+  });
+
   it('listGalleryBuilds throws on HTTP error', async () => {
     fetchMock.mockResolvedValueOnce(new Response('', { status: 500 }));
     await expect(listGalleryBuilds()).rejects.toThrow('HTTP 500');
@@ -254,6 +281,33 @@ describe('Gallery client', () => {
     fetchMock.mockResolvedValueOnce(mockFetchResponse({ detail: 'no export' }, { status: 400 }));
     await expect(downloadLDraw('Demo', 'x')).rejects.toThrow('no export');
   });
+
+  it('downloadLDraw falls back to HTTP status when error JSON lacks detail', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ other: 'thing' }), {
+      status: 502,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    await expect(downloadLDraw('Demo', 'x')).rejects.toThrow('HTTP 502');
+  });
+
+  it('downloadLDraw falls back to a default filename when header is missing', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('0 FILE demo.ldr\n', { status: 200 }));
+    const createObjectURL = vi.fn(() => 'blob:demo');
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL });
+
+    const link = document.createElement('a');
+    const click = vi.fn();
+    link.click = click;
+    const createElementSpy = vi.spyOn(document, 'createElement').mockReturnValue(link);
+
+    await downloadLDraw('Demo', '2x4 (0,0,0) #C91A09');
+
+    expect(link.download).toBe('legogen-build.ldr');
+    expect(click).toHaveBeenCalledTimes(1);
+
+    createElementSpy.mockRestore();
+  });
 });
 
 import { generateBricksStream } from './legogen';
@@ -282,7 +336,7 @@ describe('generateBricksStream', () => {
     vi.unstubAllGlobals();
   });
 
-  it('parses progress, brick, rollback, sample, result events', async () => {
+  it('parses progress, rejection, brick, rollback, sample, result events', async () => {
     const result = {
       bricks: '2x4 (0,0,0) #C91A09',
       brick_count: 1,
@@ -291,6 +345,7 @@ describe('generateBricksStream', () => {
     };
     fetchMock.mockResolvedValueOnce(sseResponse([
       'event: progress\ndata: {"stage":"stage1","message":"go","caption":"c"}\n\n',
+      'event: rejection\ndata: {"count":2}\n\n',
       'event: brick\ndata: {"count":1}\n\n',
       'event: rollback\ndata: {"count":1}\n\n',
       'event: sample\ndata: {"index":1,"of":2,"stable":true}\n\n',
@@ -301,7 +356,13 @@ describe('generateBricksStream', () => {
       prompt: 'x',
       onEvent: e => events.push(e),
     });
-    expect(events.map(e => e.type)).toEqual(['progress', 'brick', 'rollback', 'sample']);
+    expect(events).toEqual([
+      { type: 'progress', stage: 'stage1', message: 'go', caption: 'c' },
+      { type: 'rejection', count: 2 },
+      { type: 'brick', count: 1 },
+      { type: 'rollback', count: 1 },
+      { type: 'sample', index: 1, of: 2, stable: true },
+    ]);
     expect(out).toEqual(result);
   });
 

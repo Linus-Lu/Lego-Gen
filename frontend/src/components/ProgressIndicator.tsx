@@ -5,6 +5,8 @@ interface ProgressIndicatorProps {
   caption?: string;
   /** Bricks placed so far (SSE stream). */
   brickCount: number;
+  /** Cumulative candidate rejections (SSE stream). */
+  rejections: number;
   /** Rollback events (SSE stream). */
   rollbacks: number;
   /** Error message when stage === 'error'. */
@@ -23,6 +25,7 @@ export default function ProgressIndicator({
   stage,
   caption,
   brickCount,
+  rejections,
   rollbacks,
   error,
 }: ProgressIndicatorProps) {
@@ -70,8 +73,9 @@ export default function ProgressIndicator({
         <hr className="border-[var(--color-line)]" />
 
         {/* Numeric readouts */}
-        <div className="grid grid-cols-3 gap-0 border border-[var(--color-line)]">
+        <div className="grid grid-cols-4 gap-0 border border-[var(--color-line)]">
           <Readout label="BRICKS" value={brickCount} emphasis={active} />
+          <Readout label="REJECTS" value={rejections} emphasis={rejections > 0} tint={rejections > 0 ? 'var(--color-heat)' : undefined} />
           <Readout label="ROLLBACKS" value={rollbacks} emphasis={rollbacks > 0} tint={rollbacks > 0 ? 'var(--color-heat)' : undefined} />
           <Readout
             label="STATE"

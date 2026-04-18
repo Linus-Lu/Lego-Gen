@@ -3,7 +3,11 @@ from backend.brick.ldraw import export_ldr
 from backend.brick.parser import Brick
 
 
-def test_export_ldr_emits_header_and_part_lines():
+def test_export_ldr_emits_header_and_part_lines(tmp_path, monkeypatch):
+    colors = tmp_path / "colors.json"
+    colors.write_text('{"4":{"rgb":"C91A09","is_trans":false}}', encoding="utf-8")
+    monkeypatch.setattr(ldraw, "_COLORS_JSON", colors)
+
     out = export_ldr(
         [Brick(h=2, w=4, x=0, y=0, z=0, color="C91A09")],
         title="Test Build",
@@ -49,6 +53,19 @@ def test_export_ldr_uses_main_color_when_palette_file_missing(tmp_path, monkeypa
     out = export_ldr(
         [Brick(h=1, w=1, x=0, y=0, z=0, color="C91A09")],
         title="Missing Palette",
+    )
+
+    assert "1 16" in out
+
+
+def test_export_ldr_uses_main_color_when_palette_file_is_malformed(tmp_path, monkeypatch):
+    colors = tmp_path / "colors.json"
+    colors.write_text("{not valid json", encoding="utf-8")
+    monkeypatch.setattr(ldraw, "_COLORS_JSON", colors)
+
+    out = export_ldr(
+        [Brick(h=1, w=1, x=0, y=0, z=0, color="C91A09")],
+        title="Bad Palette",
     )
 
     assert "1 16" in out

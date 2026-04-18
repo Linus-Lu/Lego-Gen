@@ -9,6 +9,8 @@ import {
   generateBricksStream,
   createGalleryBuild,
   downloadLDraw,
+  getPromptValidationError,
+  MAX_PROMPT_CHARS,
   parseBrickString,
   bricksToLayers,
 } from '../api/legogen';
@@ -23,6 +25,7 @@ export default function BuildSession() {
   const [stage, setStage] = useState<Stage>('idle');
   const [caption, setCaption] = useState<string>('');
   const [brickCount, setBrickCount] = useState(0);
+  const [rejections, setRejections] = useState(0);
   const [rollbacks, setRollbacks] = useState(0);
   const [result, setResult] = useState<BrickResponse | null>(null);
   const [error, setError] = useState<string>('');
@@ -37,13 +40,28 @@ export default function BuildSession() {
     return () => abortRef.current?.abort();
   }, []);
 
-  const bricks = useMemo(() => (result ? parseBrickString(result.bricks) : []), [result]);
+  const parsedResult = useMemo(() => {
+    if (!result) return { bricks: [], parseError: '' };
+    try {
+      return { bricks: parseBrickString(result.bricks), parseError: '' };
+    } catch (e) {
+      return {
+        bricks: [],
+        parseError: e instanceof Error ? e.message : 'Invalid brick data returned by the server',
+      };
+    }
+  }, [result]);
+  const bricks = parsedResult.bricks;
   const { steps: layers, zLevels } = useMemo(() => bricksToLayers(bricks), [bricks]);
+  const promptValidationError = useMemo(() => getPromptValidationError(prompt), [prompt]);
+  const renderError = parsedResult.parseError || error;
+  const displayStage: Stage = parsedResult.parseError ? 'error' : stage;
 
   const reset = useCallback(() => {
     setStage('idle');
     setCaption('');
     setBrickCount(0);
+    setRejections(0);
     setRollbacks(0);
     setResult(null);
     setError('');
@@ -53,7 +71,15 @@ export default function BuildSession() {
 
   const run = useCallback(async () => {
     if (stage === 'stage1' || stage === 'stage2') return;
-    if (!file && !prompt.trim()) return;
+    const trimmedPrompt = prompt.trim();
+    if (!file && !trimmedPrompt) return;
+    if (promptValidationError) {
+      abortRef.current?.abort();
+      reset();
+      setError(promptValidationError);
+      setStage('error');
+      return;
+    }
 
     reset();
     setStage(file ? 'stage1' : 'stage2');
@@ -65,7 +91,7 @@ export default function BuildSession() {
     try {
       const res = await generateBricksStream({
         image: file ?? undefined,
-        prompt: prompt.trim() || undefined,
+        prompt: trimmedPrompt || undefined,
         requireStable,
         signal: controller.signal,
         onEvent: (evt: StreamEvent) => {
@@ -73,6 +99,8 @@ export default function BuildSession() {
             if (evt.stage === 'stage1') setStage('stage1');
             if (evt.stage === 'stage2') setStage('stage2');
             if (evt.caption) setCaption(evt.caption);
+          } else if (evt.type === 'rejection') {
+            setRejections(evt.count);
           } else if (evt.type === 'brick') {
             setBrickCount(evt.count);
           } else if (evt.type === 'rollback') {
@@ -83,6 +111,8 @@ export default function BuildSession() {
       if (res.caption) setCaption(res.caption);
       setResult(res);
       setBrickCount(res.brick_count);
+      setRejections(res.metadata.rejections ?? 0);
+      setRollbacks(res.metadata.rollbacks ?? 0);
       setStage('done');
       setCurrentStep(1);
       const firstWord = (res.caption ?? prompt ?? 'build').split(/\s+/).slice(0, 3).join(' ');
@@ -95,7 +125,7 @@ export default function BuildSession() {
       setError(e?.message ?? 'Generation failed');
       setStage('error');
     }
-  }, [file, prompt, requireStable, stage, reset]);
+  }, [file, prompt, promptValidationError, requireStable, stage, reset]);
 
   const save = useCallback(async () => {
     if (!result || !title.trim()) return;
@@ -116,8 +146,8 @@ export default function BuildSession() {
     }
   }, [result, title]);
 
-  const running = stage === 'stage1' || stage === 'stage2';
-  const hasResult = stage === 'done' && result;
+  const running = displayStage === 'stage1' || displayStage === 'stage2';
+  const hasResult = displayStage === 'done' && result;
 
   return (
     <div className="min-h-screen flex flex-col bp-grid text-[var(--color-fg)]">
@@ -133,9 +163,9 @@ export default function BuildSession() {
             </h1>
           </div>
           <div className="hidden md:flex items-center gap-4 pb-1">
-            <StatusDot running={running} errored={stage === 'error'} done={stage === 'done'} />
+            <StatusDot running={running} errored={displayStage === 'error'} done={displayStage === 'done'} />
             <span className="mono text-[10px] tracking-[0.2em] uppercase text-[var(--color-mute)]">
-              {running ? 'STREAMING' : stage === 'done' ? 'READY' : stage === 'error' ? 'ERRED' : 'IDLE'}
+              {running ? 'STREAMING' : displayStage === 'done' ? 'READY' : displayStage === 'error' ? 'ERRED' : 'IDLE'}
             </span>
           </div>
         </div>
@@ -150,6 +180,8 @@ export default function BuildSession() {
                 onChange={setPrompt}
                 onSubmit={run}
                 disabled={running}
+                error={promptValidationError}
+                maxChars={MAX_PROMPT_CHARS}
               />
             </div>
 
@@ -161,7 +193,7 @@ export default function BuildSession() {
               >
                 {running ? '▸ streaming…' : '▸ run pipeline'}
               </button>
-              {(hasResult || stage === 'error') && (
+              {(hasResult || displayStage === 'error') && (
                 <button onClick={reset} className="btn-ghost">
                   ↻ clear
                 </button>
@@ -192,11 +224,12 @@ export default function BuildSession() {
             </label>
 
             <ProgressIndicator
-              stage={stage}
+              stage={displayStage}
               caption={caption}
               brickCount={brickCount}
+              rejections={rejections}
               rollbacks={rollbacks}
-              error={error}
+              error={renderError}
             />
 
             {hasResult && (
