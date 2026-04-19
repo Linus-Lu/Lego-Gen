@@ -1,0 +1,11 @@
+# Best-of-N Benchmark Summary
+
+Calls BrickPipeline.generate_best_of_n for each prompt and n. Capped runs are smoke tests, not full performance results.
+
+| n | quick_smoke | capped_generation | max_bricks_per_sample | sample_timeout_s | stability_check_interval | prompt_count | success_count | success_rate | stable_rate | picked_stable_rate | final_stable_rate | recomputed_stable_rate | export_success_rate | avg_brick_count | avg_wall_time_ms | p50_wall_time_ms | avg_generation_time_ms | hit_max_bricks_rate | hit_max_seconds_rate |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | False | False | None | None | None | 10 | 0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| 2 | False | False | None | None | None | 10 | 0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| 4 | False | False | None | None | None | 10 | 0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| 8 | False | False | None | None | None | 10 | 0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| 16 | False | False | None | None | None | 10 | 0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |

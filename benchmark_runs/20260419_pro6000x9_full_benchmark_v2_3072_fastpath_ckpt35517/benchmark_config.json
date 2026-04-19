@@ -1,0 +1,25 @@
+{
+  "allow_base_model": false,
+  "bon_ns": [
+    1,
+    2,
+    4,
+    8,
+    16
+  ],
+  "bon_strategy": "cluster",
+  "capped_generation": false,
+  "comparison_label": "qwen35-4b-brick-lora-v2-pro6000-9gpu-3072-fastpath-20260418_225200@checkpoint-35517",
+  "limit_prompts": null,
+  "max_bricks_per_sample": null,
+  "modes": [
+    "core",
+    "bon",
+    "stable-only",
+    "export"
+  ],
+  "prompts_path": "/root/autodl-tmp/Lego-Gen/benchmarks/prompts/core_prompts.txt",
+  "quick_smoke": false,
+  "sample_timeout_s": null,
+  "stability_check_interval": null
+}
