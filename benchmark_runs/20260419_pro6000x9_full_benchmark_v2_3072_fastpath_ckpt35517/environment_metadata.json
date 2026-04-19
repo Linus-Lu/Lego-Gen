@@ -1,0 +1,82 @@
+{
+  "benchmark_limits": {
+    "capped_generation": false,
+    "max_bricks_per_sample": null,
+    "quick_smoke": false,
+    "sample_timeout_s": null,
+    "stability_check_interval": null
+  },
+  "comparison": {
+    "allow_base_model": false,
+    "checkpoint_dir": "/root/autodl-tmp/Lego-Gen/backend/models/checkpoints/qwen35-4b-brick-lora-v2-pro6000-9gpu-3072-fastpath-20260418_225200",
+    "label": "qwen35-4b-brick-lora-v2-pro6000-9gpu-3072-fastpath-20260418_225200@checkpoint-35517",
+    "model_id": "Qwen/Qwen3.5-4B"
+  },
+  "environment": {
+    "CUDA_VISIBLE_DEVICES": null,
+    "LEGOGEN_DEV_effective": false,
+    "LEGOGEN_DEV_raw": "0",
+    "run_mode": "real"
+  },
+  "git": {
+    "commit": "15de8052543890ac1417b93d848485cf0e0cfbd8",
+    "dirty": true,
+    "status_short": "M scripts/benchmark_legogen.py\n?? benchmark_runs/20260419_pro6000x9_full_benchmark_v2_3072_fastpath_ckpt35517/"
+  },
+  "models": {
+    "brick_adapter_config_present": true,
+    "brick_checkpoint_dir": "/root/autodl-tmp/Lego-Gen/backend/models/checkpoints/qwen35-4b-brick-lora-v2-pro6000-9gpu-3072-fastpath-20260418_225200",
+    "brick_checkpoint_present": true,
+    "brick_model_id": "Qwen/Qwen3.5-4B",
+    "stage1_adapter_config_present": false,
+    "stage1_checkpoint_dir": "/root/autodl-tmp/Lego-Gen/backend/models/checkpoints/qwen35-9b-lego-stage1-lora",
+    "stage1_checkpoint_present": false,
+    "stage1_model_id": "Qwen/Qwen3.5-9B"
+  },
+  "outlines": {
+    "available": true
+  },
+  "pipeline": {
+    "comparison_label": "qwen35-4b-brick-lora-v2-pro6000-9gpu-3072-fastpath-20260418_225200@checkpoint-35517",
+    "cuda_model_devices": [
+      "cuda:8"
+    ],
+    "hf_device_map": null,
+    "hf_device_map_device_count": 0,
+    "hf_device_map_devices": [],
+    "model_class": "PeftModelForCausalLM",
+    "model_devices": [
+      "cuda:8"
+    ],
+    "model_parallel_active": false,
+    "pipeline_class": "BrickPipeline",
+    "supports_generate_best_of_n": true,
+    "supports_generation_limits": true
+  },
+  "project_root": "/root/autodl-tmp/Lego-Gen",
+  "python": {
+    "executable": "/root/autodl-tmp/Lego-Gen/.venv/bin/python",
+    "platform": "Linux-5.15.0-78-generic-x86_64-with-glibc2.35",
+    "version": "3.12.3 | packaged by Anaconda, Inc. | (main, May  6 2024, 19:46:43) [GCC 11.2.0]"
+  },
+  "timestamp_local": "2026-04-19T11:05:03",
+  "torch": {
+    "available": true,
+    "bf16_supported": true,
+    "cuda_available": true,
+    "cuda_version": "12.8",
+    "device_count": 9,
+    "gpu_names": [
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+    ],
+    "version": "2.8.0+cu128"
+  }
+}
